@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS transactions_source (
     amount INTEGER NOT NULL,
     category TEXT,
     pending INTEGER NOT NULL DEFAULT 0 CHECK (pending IN (0, 1)),
+    opening_balance INTEGER NOT NULL DEFAULT 0 CHECK (opening_balance IN (0, 1)),
     notes TEXT,
     raw_json TEXT NOT NULL,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,

@@ -93,6 +93,8 @@ pub struct ImportedTransaction {
     pub category: Option<String>,
     #[serde(default)]
     pub pending: bool,
+    #[serde(default)]
+    pub opening_balance: bool,
     pub notes: Option<String>,
     #[serde(default)]
     pub raw: Value,
@@ -122,6 +124,8 @@ pub struct SourceTransactionData {
     pub category: Option<String>,
     #[serde(default)]
     pub pending: bool,
+    #[serde(default)]
+    pub opening_balance: bool,
     pub notes: Option<String>,
 }
 
@@ -495,6 +499,7 @@ mod tests {
             amount,
             category: Some("Shopping".into()),
             pending: false,
+            opening_balance: false,
             notes: None,
         }
     }

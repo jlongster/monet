@@ -221,6 +221,28 @@ impl Database {
         Ok((imported.transactions.len(), deleted_pending))
     }
 
+    pub fn account_sync_start_date(&self, account_id: &str) -> Result<String, DatabaseError> {
+        ensure_account(&self.connection, account_id)?;
+        self.connection
+            .query_row(
+                "WITH dates AS (
+                    SELECT
+                        MAX(CASE WHEN pending = 0 AND opening_balance = 0 THEN date END) AS latest_posted,
+                        MIN(CASE WHEN pending = 1 THEN date END) AS oldest_pending
+                    FROM transactions_source
+                    WHERE account_id = ?
+                 )
+                 SELECT CASE
+                    WHEN latest_posted IS NULL THEN strftime('%Y-01-01', 'now')
+                    ELSE date(MIN(latest_posted, COALESCE(oldest_pending, latest_posted)), '-7 days')
+                 END
+                 FROM dates",
+                [account_id],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
     pub fn list_accounts(&self) -> Result<Vec<AccountRecord>, DatabaseError> {
         let mut statement = self.connection.prepare(
             "WITH RECURSIVE descendants(root_id, id) AS (
@@ -574,8 +596,8 @@ fn upsert_source(tx: &Transaction<'_>, id: &str, input: &SourceInput) -> Result<
     tx.execute(
         "INSERT INTO transactions_source (
             id, source, external_account_id, external_transaction_id, account_id, date,
-            payee, amount, category, pending, notes, raw_json, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            payee, amount, category, pending, opening_balance, notes, raw_json, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
          ON CONFLICT(id) DO UPDATE SET
             source = excluded.source,
             external_account_id = excluded.external_account_id,
@@ -586,6 +608,7 @@ fn upsert_source(tx: &Transaction<'_>, id: &str, input: &SourceInput) -> Result<
             amount = excluded.amount,
             category = excluded.category,
             pending = excluded.pending,
+            opening_balance = excluded.opening_balance,
             notes = excluded.notes,
             raw_json = excluded.raw_json,
             updated_at = CURRENT_TIMESTAMP",
@@ -600,6 +623,7 @@ fn upsert_source(tx: &Transaction<'_>, id: &str, input: &SourceInput) -> Result<
             input.transaction.amount,
             input.transaction.category,
             input.transaction.pending,
+            input.transaction.opening_balance,
             input.transaction.notes,
             serde_json::to_string(&input.raw)?,
         ],
@@ -623,6 +647,7 @@ fn imported_source(
             amount: transaction.amount,
             category: transaction.category.clone(),
             pending: transaction.pending,
+            opening_balance: transaction.opening_balance,
             notes: transaction.notes.clone(),
         },
         raw: transaction.raw.clone(),
@@ -721,12 +746,12 @@ fn load_source(connection: &Connection, id: &str) -> Result<SourceRecord, Databa
         .query_row(
             "SELECT
                 id, source, external_account_id, external_transaction_id, account_id, date,
-                payee, amount, category, pending, notes, raw_json, updated_at
+                payee, amount, category, pending, opening_balance, notes, raw_json, updated_at
              FROM transactions_source
              WHERE id = ?",
             [id],
             |row| {
-                let raw_json: String = row.get(11)?;
+                let raw_json: String = row.get(12)?;
                 Ok((
                     SourceRecord {
                         id: row.get(0)?,
@@ -740,10 +765,11 @@ fn load_source(connection: &Connection, id: &str) -> Result<SourceRecord, Databa
                             amount: row.get(7)?,
                             category: row.get(8)?,
                             pending: row.get(9)?,
-                            notes: row.get(10)?,
+                            opening_balance: row.get(10)?,
+                            notes: row.get(11)?,
                         },
                         raw: Value::Null,
-                        updated_at: row.get(12)?,
+                        updated_at: row.get(13)?,
                     },
                     raw_json,
                 ))

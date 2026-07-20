@@ -6,6 +6,7 @@
   "scripts": {
     "agent": "bun src/agent/cli.ts",
     "demo-importer": "bun demo-importer/server.ts",
+    "origin-importer": "bun origin-importer/server.ts",
     "dev": "bun --watch src/index.tsx",
     "start": "bun src/index.tsx",
     "test": "bun test",

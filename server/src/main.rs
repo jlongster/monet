@@ -206,9 +206,11 @@ async fn run_import(State(state): State<AppState>) -> Result<Json<ImportSummary>
             segments.push(external_id);
             segments.push("transactions");
         }
-        if let Some(latest) = &account.latest_external_transaction_id {
-            url.query_pairs_mut().append_pair("after", latest);
-        }
+        let start_date = {
+            let database = state.database.lock().map_err(|_| DatabaseError::Poisoned)?;
+            database.account_sync_start_date(&account.id)?
+        };
+        url.query_pairs_mut().append_pair("start_date", &start_date);
         let imported: ImportedTransactions = fetch_json(&state.http, url).await?;
         let (transactions, deleted_pending) = {
             let mut database = state.database.lock().map_err(|_| DatabaseError::Poisoned)?;
@@ -344,12 +346,12 @@ mod tests {
 
     #[derive(Clone)]
     struct FakeImportState {
-        after: Arc<Mutex<Vec<Option<String>>>>,
+        start_dates: Arc<Mutex<Vec<Option<String>>>>,
     }
 
     #[derive(Deserialize)]
     struct ImportQuery {
-        after: Option<String>,
+        start_date: Option<String>,
     }
 
     fn test_app() -> Router {
@@ -367,6 +369,7 @@ mod tests {
             "amount": amount,
             "category": "Shopping",
             "pending": false,
+            "opening_balance": false,
             "notes": null,
             "raw": { "description": payee }
         })
@@ -810,8 +813,8 @@ mod tests {
                     "latest": null
                 }));
             }
-            let mut requests = state.after.lock().unwrap();
-            requests.push(query.after.clone());
+            let mut requests = state.start_dates.lock().unwrap();
+            requests.push(query.start_date.clone());
             if requests.len() == 1 {
                 return Json(json!({
                     "transactions": [
@@ -857,7 +860,7 @@ mod tests {
         }
 
         let fake_state = FakeImportState {
-            after: Arc::new(Mutex::new(Vec::new())),
+            start_dates: Arc::new(Mutex::new(Vec::new())),
         };
         let fake_app = Router::new()
             .route("/accounts", get(accounts))
@@ -924,8 +927,8 @@ mod tests {
         assert_eq!(next_entries["transactions"].as_array().unwrap().len(), 1);
         assert_eq!(next_entries["next"], Value::Null);
         assert_eq!(
-            fake_state.after.lock().unwrap().as_slice(),
-            &[None, Some("tx-1".into())]
+            fake_state.start_dates.lock().unwrap().as_slice(),
+            &[Some("2026-01-01".into()), Some("2026-07-12".into())]
         );
         server.abort();
     }
