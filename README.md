@@ -11,6 +11,33 @@ bun run dev
 
 Run the type checker with `bun run typecheck`.
 
+## Backend
+
+The Rust server owns the SQLite database and transaction projection model. Run it with:
+
+```sh
+cargo run --manifest-path server/Cargo.toml
+```
+
+It listens on `127.0.0.1:47832` and stores data in `.money-tui/money.db` by default. Override these
+with `MONET_SERVER_ADDR` and `MONET_DB_PATH`.
+
+Configure and run a user-hosted importer with:
+
+```sh
+curl -X PUT http://127.0.0.1:47832/import \
+  -H 'content-type: application/json' \
+  --data '{"url":"http://127.0.0.1:9000"}'
+
+curl -X POST http://127.0.0.1:47832/import/run
+```
+
+The importer serves `GET /accounts` and `GET /accounts/{account_id}/transactions`. The complete
+request and response contract is documented in the architecture note.
+
+The current decisions, operation model, HTTP API, and implementation checklist live in
+`/mnt/life/projects/finance-app-architecture.md`.
+
 ## Agent control
 
 While the app is running, an agent can inspect and operate its OpenTUI render tree through the

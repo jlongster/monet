@@ -5,15 +5,18 @@
   "type": "module",
   "scripts": {
     "agent": "bun src/agent/cli.ts",
+    "demo-importer": "bun demo-importer/server.ts",
     "dev": "bun --watch src/index.tsx",
     "start": "bun src/index.tsx",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@effect-atom/atom-react": "^0.5.0",
     "@napi-rs/canvas": "^1.0.2",
     "@opentui/core": "latest",
     "@opentui/react": "latest",
+    "effect": "^3.22.0",
     "react": "latest",
     "string-width": "^8.2.1"
   },
