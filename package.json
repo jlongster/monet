@@ -4,17 +4,16 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "agent": "bun src/agent/cli.ts",
     "demo-importer": "bun demo-importer/server.ts",
     "origin-importer": "bun origin-importer/server.ts",
     "dev": "bun --watch src/index.tsx",
     "start": "bun src/index.tsx",
-    "test": "bun test",
+    "test": "bun test --pass-with-no-tests",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@effect-atom/atom-react": "^0.5.0",
-    "@napi-rs/canvas": "^1.0.2",
+    "@kitlangton/terminal-control-opentui": "^0.6.0",
     "@opentui/core": "latest",
     "@opentui/react": "latest",
     "effect": "^3.22.0",

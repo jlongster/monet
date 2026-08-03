@@ -36,37 +36,14 @@ bun run test
 bun run typecheck
 ```
 
-The current UI contains a temporary `Agent test` panel with an OpenTUI input and clickable
-`Uppercase` and `Clear` controls. It exists to validate the agent bridge and is not part of the
-intended finance product.
+## Terminal Control
 
-## Implemented Agent Bridge
-
-Agent infrastructure is isolated under `src/agent/` and initialized at the top level in
-`src/index.tsx` after the OpenTUI renderer is created.
-
-| File | Responsibility |
-| --- | --- |
-| `src/agent/index.ts` | Public agent module entry point |
-| `src/agent/server.ts` | Local WebSocket server and request dispatch |
-| `src/agent/cli.ts` | Agent-facing CLI |
-| `src/agent/actions.ts` | OpenTUI element discovery and action execution |
-| `src/agent/screenshot.ts` | Framebuffer-to-PNG capture |
-| `src/agent/actions.test.ts` | Headless action discovery and execution tests |
-
-The bridge has been tested against the app while it was running in the user's terminal. It can
-inspect visible state, discover focusable and clickable OpenTUI renderables, type into a focused
-editor, press keys, click elements, and capture PNGs from the native framebuffer.
+Monet exposes read-only UI semantics through `@kitlangton/terminal-control-opentui` when launched
+under Terminal Control. The provider is initialized after the OpenTUI renderer is created.
 
 ```sh
-bun run agent state
-bun run agent actions
-bun run agent action '{"type":"typeText","text":"quarterly report"}'
-bun run agent action '{"type":"pressEnter"}'
-bun run agent screenshot
+termctrl run monet --host opentui --cwd "$PWD" -- bun run dev
 ```
-
-The complete agent protocol is documented in `docs/agent-control.md`.
 
 ## Finance Model Direction
 
@@ -280,7 +257,7 @@ go through one domain service that creates a complete revision, verifies the sum
 atomically makes it current. Database triggers or finalization constraints may be added as defense
 in depth, but they should not replace domain validation and invariant tests.
 
-The UI and agent bridge should call the same domain services. Neither should write ledger SQL
+The UI should call domain services rather than writing ledger SQL
 directly.
 
 ## Research Conclusions

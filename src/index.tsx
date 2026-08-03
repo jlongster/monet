@@ -1,13 +1,15 @@
 import { createCliRenderer } from "@opentui/core"
 import { createRoot } from "@opentui/react"
 import { RegistryProvider } from "@effect-atom/atom-react"
+import { provideTerminalControl } from "@kitlangton/terminal-control-opentui"
 
-import { startAgentServer } from "./agent"
 import { App } from "./app"
 
 const renderer = await createCliRenderer()
-const agentServer = startAgentServer(renderer)
-renderer.once("destroy", () => agentServer.stop())
+const terminalControlSemantics = provideTerminalControl(renderer, {
+  application: { name: "monet", version: "0.1.0" },
+})
+renderer.once("destroy", () => terminalControlSemantics.close())
 createRoot(renderer).render(
   <RegistryProvider>
     <App />

@@ -23,9 +23,9 @@ use serde::{Deserialize, Serialize};
 use crate::{
     db::{Database, DatabaseError},
     model::{
-        AccountCursor, AccountInput, AccountRecord, AccountTransactionsPage, ChangesInput,
-        ImportConfig, ImportConfigInput, ImportSummary, ImportedAccounts, ImportedTransactions,
-        ModelError, SourceBundle, SourceInput,
+        AccountCursor, AccountDeletion, AccountInput, AccountRecord, AccountTransactionsPage,
+        ChangesInput, ImportConfig, ImportConfigInput, ImportSummary, ImportedAccounts,
+        ImportedTransactions, ModelError, SourceBundle, SourceInput,
     },
 };
 
@@ -41,6 +41,11 @@ struct Health {
 }
 
 #[derive(Serialize)]
+struct TransactionCount {
+    count: usize,
+}
+
+#[derive(Serialize)]
 struct ErrorBody {
     error: String,
 }
@@ -50,6 +55,12 @@ struct AccountPageQuery {
     limit: Option<usize>,
     before_date: Option<String>,
     before_source_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct DeleteAccountQuery {
+    #[serde(default)]
+    delete_transactions: bool,
 }
 
 struct ApiError(DatabaseError);
@@ -63,7 +74,10 @@ impl IntoResponse for ApiError {
             DatabaseError::ImportNotConfigured => StatusCode::NOT_FOUND,
             DatabaseError::Model(_)
             | DatabaseError::Json(_)
-            | DatabaseError::InvalidImportUrl(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            | DatabaseError::InvalidImportUrl(_)
+            | DatabaseError::SyncedAccountDeletion(_)
+            | DatabaseError::SyncedAccountStructure(_)
+            | DatabaseError::CategoryTransactionDeletion => StatusCode::UNPROCESSABLE_ENTITY,
             DatabaseError::ImportRequest(_) => StatusCode::BAD_GATEWAY,
             DatabaseError::Sql(_) | DatabaseError::Poisoned => StatusCode::INTERNAL_SERVER_ERROR,
         };
@@ -108,7 +122,19 @@ fn create_router(database: Database) -> Router {
         .route("/import", put(configure_import).get(get_import))
         .route("/import/run", post(run_import))
         .route("/accounts", get(list_accounts))
-        .route("/accounts/{account_id}", put(upsert_account))
+        .route("/transactions", get(list_transactions))
+        .route(
+            "/transactions/unbalanced",
+            get(list_unbalanced_transactions),
+        )
+        .route(
+            "/transactions/unbalanced/count",
+            get(count_unbalanced_transactions),
+        )
+        .route(
+            "/accounts/{account_id}",
+            put(upsert_account).delete(delete_account),
+        )
         .route(
             "/accounts/{account_id}/transactions",
             get(list_account_transactions),
@@ -255,6 +281,17 @@ async fn list_accounts(
     Ok(Json(database.list_accounts()?))
 }
 
+async fn delete_account(
+    State(state): State<AppState>,
+    AxumPath(account_id): AxumPath<String>,
+    Query(query): Query<DeleteAccountQuery>,
+) -> Result<Json<AccountDeletion>, ApiError> {
+    let mut database = state.database.lock().map_err(|_| DatabaseError::Poisoned)?;
+    Ok(Json(
+        database.delete_account(&account_id, query.delete_transactions)?,
+    ))
+}
+
 async fn upsert_source(
     State(state): State<AppState>,
     AxumPath(source_id): AxumPath<String>,
@@ -295,6 +332,47 @@ async fn list_account_transactions(
     AxumPath(account_id): AxumPath<String>,
     Query(query): Query<AccountPageQuery>,
 ) -> Result<Json<AccountTransactionsPage>, ApiError> {
+    let (limit, before) = transaction_page(query)?;
+    let database = state.database.lock().map_err(|_| DatabaseError::Poisoned)?;
+    Ok(Json(database.list_account(
+        &account_id,
+        limit,
+        before.as_ref(),
+    )?))
+}
+
+async fn list_transactions(
+    State(state): State<AppState>,
+    Query(query): Query<AccountPageQuery>,
+) -> Result<Json<AccountTransactionsPage>, ApiError> {
+    let (limit, before) = transaction_page(query)?;
+    let database = state.database.lock().map_err(|_| DatabaseError::Poisoned)?;
+    Ok(Json(
+        database.list_all_transactions(limit, before.as_ref())?,
+    ))
+}
+
+async fn list_unbalanced_transactions(
+    State(state): State<AppState>,
+    Query(query): Query<AccountPageQuery>,
+) -> Result<Json<AccountTransactionsPage>, ApiError> {
+    let (limit, before) = transaction_page(query)?;
+    let database = state.database.lock().map_err(|_| DatabaseError::Poisoned)?;
+    Ok(Json(
+        database.list_unbalanced_transactions(limit, before.as_ref())?,
+    ))
+}
+
+async fn count_unbalanced_transactions(
+    State(state): State<AppState>,
+) -> Result<Json<TransactionCount>, ApiError> {
+    let database = state.database.lock().map_err(|_| DatabaseError::Poisoned)?;
+    Ok(Json(TransactionCount {
+        count: database.count_unbalanced_transactions()?,
+    }))
+}
+
+fn transaction_page(query: AccountPageQuery) -> Result<(usize, Option<AccountCursor>), ApiError> {
     let before = match (query.before_date, query.before_source_id) {
         (Some(date), Some(source_id)) => Some(AccountCursor { date, source_id }),
         (None, None) => None,
@@ -306,12 +384,7 @@ async fn list_account_transactions(
             .into());
         }
     };
-    let database = state.database.lock().map_err(|_| DatabaseError::Poisoned)?;
-    Ok(Json(database.list_account(
-        &account_id,
-        query.limit.unwrap_or(50).clamp(1, 100),
-        before.as_ref(),
-    )?))
+    Ok((query.limit.unwrap_or(50).clamp(1, 100), before))
 }
 
 async fn shutdown_signal() {
@@ -341,11 +414,18 @@ mod tests {
     const GROCERIES_ID: &str = "019bf123-0000-7000-8000-000000000012";
     const HOUSEHOLD_ID: &str = "019bf123-0000-7000-8000-000000000013";
     const PRODUCE_ID: &str = "019bf123-0000-7000-8000-000000000014";
+    const CASH_ID: &str = "019bf123-0000-7000-8000-000000000015";
+    const SAVINGS_ID: &str = "019bf123-0000-7000-8000-000000000016";
+    const SECOND_SOURCE_ID: &str = "019bf123-0000-7000-8000-000000000017";
+    const TRANSFER_POSTING_ID: &str = "019bf123-0000-7000-8000-000000000018";
+    const CARD_ID: &str = "019bf123-0000-7000-8000-000000000019";
+    const THIRD_SOURCE_ID: &str = "019bf123-0000-7000-8000-000000000020";
     const GROCERIES_POSTING_ID: &str = "019bf123-0000-7000-8000-000000000002";
     const HOUSEHOLD_POSTING_ID: &str = "019bf123-0000-7000-8000-000000000003";
 
     #[derive(Clone)]
     struct FakeImportState {
+        account_requests: Arc<Mutex<usize>>,
         start_dates: Arc<Mutex<Vec<Option<String>>>>,
     }
 
@@ -481,6 +561,44 @@ mod tests {
         json!({ "changes": changes })
     }
 
+    #[test]
+    fn existing_synced_account_names_are_backfilled() {
+        let path = std::env::temp_dir().join(format!("monet-{}.db", uuid::Uuid::now_v7()));
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(&format!(
+                "CREATE TABLE accounts (
+                    id TEXT PRIMARY KEY,
+                    parent_id TEXT REFERENCES accounts(id),
+                    external_id TEXT UNIQUE,
+                    name TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    latest_external_transaction_id TEXT
+                 );
+                 INSERT INTO accounts (id, external_id, name, type)
+                 VALUES ('{CHECKING_ID}', 'bank', 'Checking', 'asset');
+                 INSERT INTO accounts (id, name, type)
+                 VALUES ('{EXPENSES_ID}', 'Expenses', 'expense');"
+            ))
+            .unwrap();
+        drop(connection);
+
+        let database = Database::open(path.to_str().unwrap()).unwrap();
+        let accounts = database.list_accounts().unwrap();
+        let checking = accounts
+            .iter()
+            .find(|account| account.id == CHECKING_ID)
+            .unwrap();
+        let expenses = accounts
+            .iter()
+            .find(|account| account.id == EXPENSES_ID)
+            .unwrap();
+        assert_eq!(checking.imported_name.as_deref(), Some("Checking"));
+        assert_eq!(expenses.imported_name, None);
+        drop(database);
+        std::fs::remove_file(path).unwrap();
+    }
+
     #[tokio::test]
     async fn accounts_support_types_and_hierarchy() {
         let app = test_app();
@@ -541,6 +659,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn accounts_can_be_renamed_reparented_and_retyped_as_roots() {
+        let app = test_app();
+        setup_accounts(&app).await;
+
+        let moved = put_account(&app, HOUSEHOLD_ID, Some(GROCERIES_ID), "Home", "expense").await;
+        assert_eq!(moved["name"], "Home");
+        assert_eq!(moved["parent_id"], GROCERIES_ID);
+        assert_eq!(moved["type"], "expense");
+
+        let root = put_account(&app, HOUSEHOLD_ID, None, "Home", "income").await;
+        assert_eq!(root["name"], "Home");
+        assert_eq!(root["parent_id"], Value::Null);
+        assert_eq!(root["type"], "income");
+    }
+
+    #[tokio::test]
     async fn an_unassigned_source_materializes_one_posting() {
         let app = test_app();
         setup_accounts(&app).await;
@@ -552,6 +686,11 @@ mod tests {
         assert_eq!(body["postings"][0]["amount"], -10_000);
         assert_eq!(body["unallocated_amount"], 10_000);
         assert_eq!(body["source"]["category"], "Shopping");
+
+        let (status, count) =
+            request(&app, Method::GET, "/transactions/unbalanced/count", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(count["count"], 1);
     }
 
     #[tokio::test]
@@ -688,6 +827,227 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn parent_account_register_includes_descendants_without_duplicate_sources() {
+        let app = test_app();
+        setup_accounts(&app).await;
+        put_account(&app, CASH_ID, None, "Cash", "asset").await;
+        put_account(&app, CHECKING_ID, Some(CASH_ID), "Checking", "asset").await;
+        put_account(&app, SAVINGS_ID, Some(CASH_ID), "Savings", "asset").await;
+
+        put_source(&app, -10_000, "Transfer to savings").await;
+        let (status, _) = request(
+            &app,
+            Method::POST,
+            &format!("/sources/{SOURCE_ID}/changes"),
+            Some(json!({
+                "changes": [
+                    { "operation": "split", "target_id": TRANSFER_POSTING_ID },
+                    {
+                        "operation": "set",
+                        "target_id": TRANSFER_POSTING_ID,
+                        "field": "account_id",
+                        "value": SAVINGS_ID
+                    },
+                    {
+                        "operation": "set",
+                        "target_id": TRANSFER_POSTING_ID,
+                        "field": "amount",
+                        "value": 10_000
+                    }
+                ]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let mut savings_source = source(2_500, "Interest");
+        savings_source["external_account_id"] = json!("savings-123");
+        savings_source["external_transaction_id"] = json!("interest-1");
+        savings_source["account_id"] = json!(SAVINGS_ID);
+        let (status, _) = request(
+            &app,
+            Method::PUT,
+            &format!("/sources/{SECOND_SOURCE_ID}"),
+            Some(savings_source),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, group) = request(
+            &app,
+            Method::GET,
+            &format!("/accounts/{CASH_ID}/transactions"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let transactions = group["transactions"].as_array().unwrap();
+        assert_eq!(transactions.len(), 2);
+
+        let transfer = transactions
+            .iter()
+            .find(|transaction| transaction["source_id"] == SOURCE_ID)
+            .unwrap();
+        assert_eq!(transfer["account_id"], CHECKING_ID);
+        assert_eq!(transfer["other_postings"].as_array().unwrap().len(), 1);
+        assert_eq!(transfer["other_postings"][0]["account_id"], SAVINGS_ID);
+
+        let interest = transactions
+            .iter()
+            .find(|transaction| transaction["source_id"] == SECOND_SOURCE_ID)
+            .unwrap();
+        assert_eq!(interest["account_id"], SAVINGS_ID);
+
+        let (status, savings) = request(
+            &app,
+            Method::GET,
+            &format!("/accounts/{SAVINGS_ID}/transactions"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(savings["transactions"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn all_transactions_register_includes_every_account_once_per_source() {
+        let app = test_app();
+        setup_accounts(&app).await;
+        put_account(&app, CARD_ID, None, "Credit card", "liability").await;
+
+        put_source(&app, -10_000, "Target").await;
+        let (status, _) = request(
+            &app,
+            Method::POST,
+            &format!("/sources/{SOURCE_ID}/changes"),
+            Some(split_changes(6_000, None)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let mut card_source = source(-500, "Coffee");
+        card_source["external_account_id"] = json!("card-123");
+        card_source["external_transaction_id"] = json!("coffee-1");
+        card_source["account_id"] = json!(CARD_ID);
+        let (status, _) = request(
+            &app,
+            Method::PUT,
+            &format!("/sources/{THIRD_SOURCE_ID}"),
+            Some(card_source),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, all) = request(&app, Method::GET, "/transactions", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let transactions = all["transactions"].as_array().unwrap();
+        assert_eq!(transactions.len(), 2);
+        assert!(
+            transactions
+                .iter()
+                .any(|transaction| transaction["account_id"] == CHECKING_ID)
+        );
+        assert!(
+            transactions
+                .iter()
+                .any(|transaction| transaction["account_id"] == CARD_ID)
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_local_account_preserves_transactions_with_null_postings() {
+        let app = test_app();
+        setup_accounts(&app).await;
+        put_source(&app, -10_000, "Target").await;
+        let (status, _) = request(
+            &app,
+            Method::POST,
+            &format!("/sources/{SOURCE_ID}/changes"),
+            Some(split_changes(10_000, None)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, deletion) = request(
+            &app,
+            Method::DELETE,
+            &format!("/accounts/{GROCERIES_ID}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(deletion["accounts"], 1);
+        assert_eq!(deletion["transactions"], 0);
+        assert_eq!(deletion["nulled_postings"], 1);
+
+        let (status, source) =
+            request(&app, Method::GET, &format!("/sources/{SOURCE_ID}"), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(source["postings"][1]["account_id"], Value::Null);
+
+        let source = put_source(&app, -12_000, "Target after reimport").await;
+        assert_eq!(source["postings"][1]["account_id"], Value::Null);
+
+        let (status, unbalanced) =
+            request(&app, Method::GET, "/transactions/unbalanced", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(unbalanced["transactions"].as_array().unwrap().len(), 1);
+        assert_eq!(unbalanced["transactions"][0]["account_id"], Value::Null);
+        let (status, count) =
+            request(&app, Method::GET, "/transactions/unbalanced/count", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(count["count"], 1);
+    }
+
+    #[tokio::test]
+    async fn deleting_local_account_can_delete_affected_transactions() {
+        let app = test_app();
+        setup_accounts(&app).await;
+        put_source(&app, -10_000, "Target").await;
+
+        let (status, deletion) = request(
+            &app,
+            Method::DELETE,
+            &format!("/accounts/{CHECKING_ID}?delete_transactions=true"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(deletion["accounts"], 1);
+        assert_eq!(deletion["transactions"], 1);
+
+        let (status, _) = request(&app, Method::GET, &format!("/sources/{SOURCE_ID}"), None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn deleting_a_category_cannot_delete_transactions() {
+        let app = test_app();
+        setup_accounts(&app).await;
+        put_source(&app, -10_000, "Target").await;
+        let (status, _) = request(
+            &app,
+            Method::POST,
+            &format!("/sources/{SOURCE_ID}/changes"),
+            Some(split_changes(10_000, None)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, _) = request(
+            &app,
+            Method::DELETE,
+            &format!("/accounts/{GROCERIES_ID}?delete_transactions=true"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+        let (status, _) = request(&app, Method::GET, &format!("/sources/{SOURCE_ID}"), None).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
     async fn removing_splits_returns_to_the_source_posting() {
         let app = test_app();
         setup_accounts(&app).await;
@@ -791,14 +1151,25 @@ mod tests {
 
     #[tokio::test]
     async fn importer_syncs_accounts_cursors_pending_and_postings() {
-        async fn accounts() -> Json<Value> {
-            Json(json!({
-                "accounts": [
-                    { "id": "bank", "parent_id": null, "name": "Checking", "type": "asset" },
-                    { "id": "expenses", "parent_id": null, "name": "Expenses", "type": "expense" },
-                    { "id": "groceries", "parent_id": "expenses", "name": "Groceries", "type": "expense" }
-                ]
-            }))
+        async fn accounts(State(state): State<FakeImportState>) -> Json<Value> {
+            let mut requests = state.account_requests.lock().unwrap();
+            *requests += 1;
+            let mut accounts = vec![
+                json!({ "id": "expenses", "parent_id": null, "name": "Expenses", "type": "expense" }),
+                json!({ "id": "groceries", "parent_id": "expenses", "name": "Groceries", "type": "expense" }),
+            ];
+            if *requests <= 2 {
+                let name = if *requests == 1 {
+                    "Checking"
+                } else {
+                    "Checking from Origin"
+                };
+                accounts.insert(
+                    0,
+                    json!({ "id": "bank", "parent_id": null, "name": name, "type": "asset" }),
+                );
+            }
+            Json(json!({ "accounts": accounts }))
         }
 
         async fn transactions(
@@ -860,6 +1231,7 @@ mod tests {
         }
 
         let fake_state = FakeImportState {
+            account_requests: Arc::new(Mutex::new(0)),
             start_dates: Arc::new(Mutex::new(Vec::new())),
         };
         let fake_app = Router::new()
@@ -895,12 +1267,52 @@ mod tests {
             .find(|account| account["external_id"] == "bank")
             .unwrap();
         let checking_id = checking["id"].as_str().unwrap();
+        assert_eq!(checking["name"], "Checking");
+        assert_eq!(checking["imported_name"], "Checking");
         assert_eq!(checking["latest_external_transaction_id"], "tx-1");
+
+        let edited = put_account(&app, checking_id, None, "Everyday checking", "asset").await;
+        assert_eq!(edited["name"], "Everyday checking");
+        assert_eq!(edited["imported_name"], "Checking");
+
+        put_account(&app, CASH_ID, None, "Cash", "asset").await;
+        let (status, _) = request(
+            &app,
+            Method::PUT,
+            &format!("/accounts/{checking_id}"),
+            Some(json!({
+                "parent_id": CASH_ID,
+                "name": "Everyday checking",
+                "type": "asset"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+        let (status, _) = request(
+            &app,
+            Method::DELETE,
+            &format!("/accounts/{checking_id}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 
         let (status, second) = request(&app, Method::POST, "/import/run", None).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(second["transactions"], 1);
         assert_eq!(second["deleted_pending"], 1);
+
+        let (status, accounts) = request(&app, Method::GET, "/accounts", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let checking = accounts
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|account| account["external_id"] == "bank")
+            .unwrap();
+        assert_eq!(checking["name"], "Everyday checking");
+        assert_eq!(checking["imported_name"], "Checking from Origin");
 
         let (status, entries) = request(
             &app,
@@ -926,9 +1338,34 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(next_entries["transactions"].as_array().unwrap().len(), 1);
         assert_eq!(next_entries["next"], Value::Null);
+        let surviving_source_id = next_entries["transactions"][0]["source_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
         assert_eq!(
             fake_state.start_dates.lock().unwrap().as_slice(),
             &[Some("2026-01-01".into()), Some("2026-07-12".into())]
+        );
+
+        let (status, third) = request(&app, Method::POST, "/import/run", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(third["accounts"], 2);
+        let (status, _) = request(
+            &app,
+            Method::GET,
+            &format!("/sources/{surviving_source_id}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, accounts) = request(&app, Method::GET, "/accounts", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            accounts
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|account| account["external_id"] != "bank")
         );
         server.abort();
     }

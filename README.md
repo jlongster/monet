@@ -38,27 +38,17 @@ request and response contract is documented in the architecture note.
 The current decisions, operation model, HTTP API, and implementation checklist live in
 `/mnt/life/projects/finance-app-architecture.md`.
 
-## Agent control
+## Terminal Control
 
-While the app is running, an agent can inspect and operate its OpenTUI render tree through the
-local WebSocket server:
+Run Monet in a shared Terminal Control workspace to use it in a real terminal while agents can
+inspect and operate the same session:
 
 ```sh
-bun run agent screenshot
-bun run agent state
-bun run agent actions
-bun run agent action '{"type":"pressArrow","direction":"down"}'
+termctrl run monet --host opentui --cwd "$PWD" -- bun run dev
 ```
 
-`screenshot` prints the absolute path of a generated PNG under `.money-tui/screenshots`. `state`
-returns the visible text, focus state, interactive elements, and currently available actions.
-Actions support `typeText`, `pressKey`, `pressEnter`, `pressArrow`, `focus`, and `click`.
-
-Set `MONEY_TUI_AGENT_PORT` on the app to change the default port (`47831`), and set
-`MONEY_TUI_AGENT_URL` for the CLI when connecting to a non-default URL.
-
-See [Agent Control](docs/agent-control.md) for the protocol, action model, configuration, and
-implementation details.
+Reattach later with `termctrl attach monet`. Monet provides a semantic snapshot to Terminal Control
+when the host makes that capability available.
 
 See [Architecture Handoff](docs/architecture-handoff.md) for the current implementation state and
 the proposed double-entry finance data model.

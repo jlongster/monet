@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     parent_id TEXT REFERENCES accounts(id),
     external_id TEXT UNIQUE,
     name TEXT NOT NULL,
+    imported_name TEXT,
     type TEXT NOT NULL CHECK (type IN ('asset', 'liability', 'income', 'expense', 'equity')),
     latest_external_transaction_id TEXT
 );
@@ -25,7 +26,7 @@ CREATE TABLE IF NOT EXISTS transactions_source (
     source TEXT NOT NULL,
     external_account_id TEXT NOT NULL,
     external_transaction_id TEXT NOT NULL,
-    account_id TEXT NOT NULL REFERENCES accounts(id),
+    account_id TEXT REFERENCES accounts(id) ON DELETE SET NULL,
     date TEXT NOT NULL,
     payee TEXT,
     amount INTEGER NOT NULL,
@@ -54,7 +55,7 @@ ON transactions_changes(source_id, id);
 CREATE TABLE IF NOT EXISTS postings (
     id TEXT PRIMARY KEY,
     source_id TEXT NOT NULL REFERENCES transactions_source(id) ON DELETE CASCADE,
-    account_id TEXT NOT NULL REFERENCES accounts(id),
+    account_id TEXT REFERENCES accounts(id) ON DELETE SET NULL,
     date TEXT NOT NULL,
     payee TEXT,
     amount INTEGER NOT NULL,

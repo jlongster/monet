@@ -52,6 +52,7 @@ pub struct AccountRecord {
     pub parent_id: Option<String>,
     pub external_id: Option<String>,
     pub name: String,
+    pub imported_name: Option<String>,
     #[serde(rename = "type")]
     pub account_type: AccountType,
     pub latest_external_transaction_id: Option<String>,
@@ -117,7 +118,7 @@ pub struct ImportSummary {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct SourceTransactionData {
-    pub account_id: String,
+    pub account_id: Option<String>,
     pub date: String,
     pub payee: Option<String>,
     pub amount: i64,
@@ -183,7 +184,7 @@ pub struct StoredChange {
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct PostingData {
-    pub account_id: String,
+    pub account_id: Option<String>,
     pub date: String,
     pub payee: Option<String>,
     pub amount: i64,
@@ -216,15 +217,16 @@ pub struct SourceBundle {
 #[derive(Clone, Debug, Serialize)]
 pub struct OtherPosting {
     pub posting_id: String,
-    pub account_id: String,
-    pub account_name: String,
+    pub account_id: Option<String>,
+    pub account_name: Option<String>,
     pub amount: i64,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct AccountTransaction {
     pub source_id: String,
-    pub account_id: String,
+    pub posting_id: String,
+    pub account_id: Option<String>,
     pub date: String,
     pub payee: Option<String>,
     pub amount: i64,
@@ -245,6 +247,13 @@ pub struct AccountCursor {
 pub struct AccountTransactionsPage {
     pub transactions: Vec<AccountTransaction>,
     pub next: Option<AccountCursor>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct AccountDeletion {
+    pub accounts: usize,
+    pub transactions: usize,
+    pub nulled_postings: usize,
 }
 
 #[derive(Debug, Error)]
@@ -291,7 +300,7 @@ pub enum ModelError {
 #[derive(Clone, Debug)]
 struct Split {
     id: String,
-    account_id: Option<String>,
+    account_id: Option<Option<String>>,
     amount: Option<i64>,
 }
 
@@ -314,7 +323,9 @@ pub fn validate_account(id: &str, account: &AccountInput) -> Result<(), ModelErr
 
 pub fn validate_source(id: &str, source: &SourceInput) -> Result<(), ModelError> {
     validate_uuid(id)?;
-    validate_uuid(&source.transaction.account_id)?;
+    if let Some(account_id) = &source.transaction.account_id {
+        validate_uuid(account_id)?;
+    }
     if source.transaction.date.is_empty() {
         return Err(ModelError::InvalidSource);
     }
@@ -377,7 +388,10 @@ pub fn reduce(
     }
 
     let mut allocated = base.amount;
-    let mut posting_accounts = HashSet::from([base.account_id.clone()]);
+    let mut posting_accounts = HashSet::new();
+    if let Some(account_id) = &base.account_id {
+        posting_accounts.insert(account_id.clone());
+    }
     let mut postings = Vec::with_capacity(splits.len() + 1);
     postings.push(Posting {
         id: source_id.to_owned(),
@@ -392,8 +406,10 @@ pub fn reduce(
         let amount = split
             .amount
             .ok_or_else(|| ModelError::MissingSplitAmount(split.id.clone()))?;
-        if !posting_accounts.insert(account_id.clone()) {
-            return Err(ModelError::DuplicatePostingAccount(account_id));
+        if let Some(account_id) = &account_id
+            && !posting_accounts.insert(account_id.clone())
+        {
+            return Err(ModelError::DuplicatePostingAccount(account_id.clone()));
         }
         allocated = allocated
             .checked_add(amount)
@@ -417,7 +433,7 @@ pub fn reduce(
 
 fn set_base(base: &mut PostingData, field: &str, value: &Value) -> Result<(), ModelError> {
     match field {
-        "account_id" => base.account_id = required_uuid(field, value)?,
+        "account_id" => base.account_id = optional_uuid(field, value)?,
         "date" => base.date = required_string(field, value)?,
         "payee" => base.payee = optional_string(field, value)?,
         "amount" => base.amount = integer(field, value)?,
@@ -429,7 +445,7 @@ fn set_base(base: &mut PostingData, field: &str, value: &Value) -> Result<(), Mo
 
 fn set_split(split: &mut Split, field: &str, value: &Value) -> Result<(), ModelError> {
     match field {
-        "account_id" => split.account_id = Some(required_uuid(field, value)?),
+        "account_id" => split.account_id = Some(optional_uuid(field, value)?),
         "amount" => split.amount = Some(integer(field, value)?),
         _ => return Err(ModelError::UnknownField(field.to_owned())),
     }
@@ -446,6 +462,13 @@ fn required_uuid(field: &str, value: &Value) -> Result<String, ModelError> {
     let value = required_string(field, value)?;
     validate_uuid(&value)?;
     Ok(value)
+}
+
+fn optional_uuid(field: &str, value: &Value) -> Result<Option<String>, ModelError> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    required_uuid(field, value).map(Some)
 }
 
 fn required_string(field: &str, value: &Value) -> Result<String, ModelError> {
@@ -493,7 +516,7 @@ mod tests {
 
     fn source(amount: i64) -> SourceTransactionData {
         SourceTransactionData {
-            account_id: CHECKING_ID.into(),
+            account_id: Some(CHECKING_ID.into()),
             date: "2026-07-20".into(),
             payee: Some("TARGET #1842".into()),
             amount,
@@ -518,7 +541,10 @@ mod tests {
 
         assert_eq!(projection.postings.len(), 1);
         assert_eq!(projection.postings[0].id, SOURCE_ID);
-        assert_eq!(projection.postings[0].posting.account_id, CHECKING_ID);
+        assert_eq!(
+            projection.postings[0].posting.account_id.as_deref(),
+            Some(CHECKING_ID)
+        );
         assert_eq!(projection.postings[0].posting.amount, -10_000);
         assert_eq!(projection.unallocated_amount, 10_000);
     }

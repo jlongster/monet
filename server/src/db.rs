@@ -10,10 +10,11 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::model::{
-    AccountCursor, AccountInput, AccountRecord, AccountTransaction, AccountTransactionsPage,
-    AccountType, Change, ImportConfig, ImportedAccount, ImportedTransaction, ImportedTransactions,
-    ModelError, OtherPosting, Posting, PostingData, Projection, SourceBundle, SourceInput,
-    SourceRecord, SourceTransactionData, StoredChange, reduce,
+    AccountCursor, AccountDeletion, AccountInput, AccountRecord, AccountTransaction,
+    AccountTransactionsPage, AccountType, Change, ImportConfig, ImportedAccount,
+    ImportedTransaction, ImportedTransactions, ModelError, OtherPosting, Posting, PostingData,
+    Projection, SourceBundle, SourceInput, SourceRecord, SourceTransactionData, StoredChange,
+    reduce,
 };
 
 pub struct Database {
@@ -32,6 +33,12 @@ pub enum DatabaseError {
     SourceNotFound(String),
     #[error("account '{0}' was not found")]
     AccountNotFound(String),
+    #[error("synced account '{0}' cannot be deleted locally")]
+    SyncedAccountDeletion(String),
+    #[error("synced account '{0}' hierarchy and type are managed by its importer")]
+    SyncedAccountStructure(String),
+    #[error("deleting an income or expense account must preserve its transactions")]
+    CategoryTransactionDeletion,
     #[error("importer is not configured")]
     ImportNotConfigured,
     #[error("invalid importer URL: {0}")]
@@ -48,6 +55,32 @@ impl Database {
     pub fn open(path: &str) -> Result<Self, DatabaseError> {
         let connection = Connection::open(path)?;
         connection.execute_batch(include_str!("../migrations/001_initial.sql"))?;
+        let account_columns = {
+            let mut statement = connection.prepare("PRAGMA table_info(transactions_source)")?;
+            let rows = statement.query_map([], |row| {
+                Ok((row.get::<_, String>(1)?, row.get::<_, bool>(3)?))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        let account_id_required = account_columns
+            .iter()
+            .any(|(name, required)| name == "account_id" && *required);
+        if account_id_required {
+            connection.execute_batch(include_str!(
+                "../migrations/002_nullable_account_references.sql"
+            ))?;
+        }
+        let has_imported_name = {
+            let mut statement = connection.prepare("PRAGMA table_info(accounts)")?;
+            let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+                .iter()
+                .any(|name| name == "imported_name")
+        };
+        if !has_imported_name {
+            connection
+                .execute_batch(include_str!("../migrations/003_imported_account_names.sql"))?;
+        }
         Ok(Self { connection })
     }
 
@@ -58,6 +91,26 @@ impl Database {
     ) -> Result<AccountRecord, DatabaseError> {
         crate::model::validate_account(id, &input)?;
         let tx = self.connection.transaction()?;
+        let synced_account = tx
+            .query_row(
+                "SELECT external_id, parent_id, type FROM accounts WHERE id = ?",
+                [id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if let Some((Some(_), parent_id, account_type)) = synced_account {
+            if parent_id != input.parent_id
+                || AccountType::parse(&account_type)? != input.account_type
+            {
+                return Err(DatabaseError::SyncedAccountStructure(id.to_owned()));
+            }
+        }
         validate_account_hierarchy(&tx, id, input.parent_id.as_deref(), input.account_type)?;
         tx.execute(
             "INSERT INTO accounts (id, parent_id, name, type)
@@ -70,6 +123,45 @@ impl Database {
         )?;
         tx.commit()?;
         self.get_account(id)
+    }
+
+    pub fn delete_account(
+        &mut self,
+        id: &str,
+        delete_transactions: bool,
+    ) -> Result<AccountDeletion, DatabaseError> {
+        ensure_account(&self.connection, id)?;
+        let account_type =
+            self.connection
+                .query_row("SELECT type FROM accounts WHERE id = ?", [id], |row| {
+                    row.get::<_, String>(0)
+                })?;
+        if delete_transactions
+            && matches!(
+                AccountType::parse(&account_type)?,
+                AccountType::Income | AccountType::Expense
+            )
+        {
+            return Err(DatabaseError::CategoryTransactionDeletion);
+        }
+        let tx = self.connection.transaction()?;
+        let account_ids = descendant_account_ids(&tx, id)?;
+        let synced = account_ids.iter().find_map(|account_id| {
+            tx.query_row(
+                "SELECT external_id FROM accounts WHERE id = ?",
+                [account_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .ok()
+            .flatten()
+            .map(|_| account_id.clone())
+        });
+        if let Some(account_id) = synced {
+            return Err(DatabaseError::SyncedAccountDeletion(account_id));
+        }
+        let deletion = delete_accounts(&tx, &account_ids, delete_transactions)?;
+        tx.commit()?;
+        Ok(deletion)
     }
 
     pub fn configure_import(&mut self, url: String) -> Result<ImportConfig, DatabaseError> {
@@ -124,17 +216,73 @@ impl Database {
         }
 
         let tx = self.connection.transaction()?;
+        let missing_accounts = {
+            let mut statement =
+                tx.prepare("SELECT id, external_id FROM accounts WHERE external_id IS NOT NULL")?;
+            let rows = statement.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .filter(|(id, external_id)| {
+                    *id == imported_uuid(&namespace, "account", external_id)
+                        && !external_ids.contains(external_id.as_str())
+                })
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>()
+        };
+        for account_id in missing_accounts {
+            let exists = tx
+                .query_row("SELECT 1 FROM accounts WHERE id = ?", [&account_id], |_| {
+                    Ok(())
+                })
+                .optional()?
+                .is_some();
+            if !exists {
+                continue;
+            }
+            let account_ids = descendant_account_ids(&tx, &account_id)?;
+            let placeholders = std::iter::repeat_n("?", account_ids.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let external_sql = format!(
+                "SELECT external_id FROM accounts
+                 WHERE id IN ({placeholders}) AND external_id IS NOT NULL"
+            );
+            let account_values: Vec<SqlValue> =
+                account_ids.iter().cloned().map(SqlValue::Text).collect();
+            let removed_external_ids = {
+                let mut statement = tx.prepare(&external_sql)?;
+                let rows = statement.query_map(params_from_iter(account_values.iter()), |row| {
+                    row.get::<_, String>(0)
+                })?;
+                rows.collect::<Result<Vec<_>, _>>()?
+            };
+            for external_id in removed_external_ids {
+                tx.execute(
+                    "DELETE FROM transactions_source WHERE source = ? AND external_account_id = ?",
+                    params![config.id, external_id],
+                )?;
+            }
+            delete_accounts(&tx, &account_ids, false)?;
+        }
         for account in accounts {
             let id = imported_uuid(&namespace, "account", &account.id);
             tx.execute(
-                "INSERT INTO accounts (id, parent_id, external_id, name, type)
-                 VALUES (?, NULL, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    parent_id = NULL,
-                    external_id = excluded.external_id,
-                    name = excluded.name,
-                    type = excluded.type",
-                params![id, account.id, account.name, account.account_type.as_str()],
+                "INSERT INTO accounts (id, parent_id, external_id, name, imported_name, type)
+                  VALUES (?, NULL, ?, ?, ?, ?)
+                 ON CONFLICT(id) DO UPDATE SET
+                     parent_id = NULL,
+                     external_id = excluded.external_id,
+                     imported_name = excluded.imported_name,
+                     type = excluded.type",
+                params![
+                    id,
+                    account.id,
+                    account.name,
+                    account.name,
+                    account.account_type.as_str()
+                ],
             )?;
         }
         for account in accounts {
@@ -262,6 +410,7 @@ impl Database {
                 accounts.parent_id,
                 accounts.external_id,
                 accounts.name,
+                accounts.imported_name,
                 accounts.type,
                 accounts.latest_external_transaction_id,
                 balances.balance,
@@ -276,20 +425,31 @@ impl Database {
                 row.get::<_, Option<String>>(1)?,
                 row.get::<_, Option<String>>(2)?,
                 row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, Option<String>>(5)?,
-                row.get::<_, i64>(6)?,
-                row.get::<_, bool>(7)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, i64>(7)?,
+                row.get::<_, bool>(8)?,
             ))
         })?;
         rows.map(|row| {
-            let (id, parent_id, external_id, name, account_type, latest, balance, has_children) =
-                row?;
+            let (
+                id,
+                parent_id,
+                external_id,
+                name,
+                imported_name,
+                account_type,
+                latest,
+                balance,
+                has_children,
+            ) = row?;
             Ok(AccountRecord {
                 id,
                 parent_id,
                 external_id,
                 name,
+                imported_name,
                 account_type: AccountType::parse(&account_type)?,
                 latest_external_transaction_id: latest,
                 balance,
@@ -373,27 +533,106 @@ impl Database {
         limit: usize,
         before: Option<&AccountCursor>,
     ) -> Result<AccountTransactionsPage, DatabaseError> {
-        let total_started = Instant::now();
         ensure_account(&self.connection, account_id)?;
+        self.list_transactions(Some(account_id), limit, before, false)
+    }
+
+    pub fn list_all_transactions(
+        &self,
+        limit: usize,
+        before: Option<&AccountCursor>,
+    ) -> Result<AccountTransactionsPage, DatabaseError> {
+        self.list_transactions(None, limit, before, false)
+    }
+
+    pub fn list_unbalanced_transactions(
+        &self,
+        limit: usize,
+        before: Option<&AccountCursor>,
+    ) -> Result<AccountTransactionsPage, DatabaseError> {
+        self.list_transactions(None, limit, before, true)
+    }
+
+    pub fn count_unbalanced_transactions(&self) -> Result<usize, DatabaseError> {
+        self.connection
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM (
+                    SELECT source_id
+                    FROM postings
+                    GROUP BY source_id
+                    HAVING SUM(amount) != 0
+                        OR SUM(CASE WHEN account_id IS NULL THEN 1 ELSE 0 END) > 0
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    fn list_transactions(
+        &self,
+        account_id: Option<&str>,
+        limit: usize,
+        before: Option<&AccountCursor>,
+        unbalanced: bool,
+    ) -> Result<AccountTransactionsPage, DatabaseError> {
+        let total_started = Instant::now();
         let base_started = Instant::now();
         let mut statement = self.connection.prepare(
-            "WITH account_rows AS (
+            "WITH RECURSIVE descendants(id) AS (
+                SELECT accounts.id
+                FROM accounts
+                WHERE ?1 IS NULL OR accounts.id = ?1
+                UNION
+                SELECT accounts.id
+                FROM descendants
+                JOIN accounts ON accounts.parent_id = descendants.id
+             ), ranked_rows AS (
                 SELECT
-                    source_id,
-                    account_id,
-                    date,
-                    payee,
-                    amount,
-                    pending,
-                    notes
+                    postings.source_id,
+                    postings.id,
+                    postings.account_id,
+                    postings.date,
+                    postings.payee,
+                    postings.amount,
+                    postings.pending,
+                    postings.notes,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY postings.source_id
+                        ORDER BY
+                            CASE WHEN ?5 = 1 AND postings.account_id IS NULL THEN 0 ELSE 1 END,
+                            CASE WHEN postings.id = postings.source_id THEN 0 ELSE 1 END,
+                            postings.account_id
+                    ) AS source_rank
                 FROM postings
-                WHERE account_id = ?1
-                  AND (?2 IS NULL OR date < ?2 OR (date = ?2 AND source_id < ?3))
+                LEFT JOIN descendants ON descendants.id = postings.account_id
+                WHERE (?5 = 1 OR descendants.id IS NOT NULL)
+                  AND (
+                    ?5 = 0
+                    OR postings.source_id IN (
+                        SELECT source_id
+                        FROM postings
+                        GROUP BY source_id
+                        HAVING SUM(amount) != 0
+                            OR SUM(CASE WHEN account_id IS NULL THEN 1 ELSE 0 END) > 0
+                    )
+                  )
+                  AND (
+                    ?2 IS NULL
+                    OR postings.date < ?2
+                    OR (postings.date = ?2 AND postings.source_id < ?3)
+                  )
+             ), account_rows AS (
+                SELECT source_id, id, account_id, date, payee, amount, pending, notes
+                FROM ranked_rows
+                WHERE source_rank = 1
                 ORDER BY date DESC, source_id DESC
                 LIMIT ?4
              )
              SELECT
                 account_rows.source_id,
+                account_rows.id,
                 account_rows.account_id,
                 account_rows.date,
                 account_rows.payee,
@@ -410,18 +649,25 @@ impl Database {
         let before_date = before.map(|cursor| cursor.date.as_str());
         let before_source_id = before.map(|cursor| cursor.source_id.as_str());
         let rows = statement.query_map(
-            params![account_id, before_date, before_source_id, limit + 1],
+            params![
+                account_id,
+                before_date,
+                before_source_id,
+                limit + 1,
+                unbalanced
+            ],
             |row| {
                 Ok(AccountTransaction {
                     source_id: row.get(0)?,
-                    account_id: row.get(1)?,
-                    date: row.get(2)?,
-                    payee: row.get(3)?,
-                    amount: row.get(4)?,
-                    pending: row.get(5)?,
-                    notes: row.get(6)?,
-                    posting_count: row.get(7)?,
-                    unallocated_amount: row.get(8)?,
+                    posting_id: row.get(1)?,
+                    account_id: row.get(2)?,
+                    date: row.get(3)?,
+                    payee: row.get(4)?,
+                    amount: row.get(5)?,
+                    pending: row.get(6)?,
+                    notes: row.get(7)?,
+                    posting_count: row.get(8)?,
+                    unallocated_amount: row.get(9)?,
                     other_postings: Vec::new(),
                 })
             },
@@ -454,15 +700,14 @@ impl Database {
             let sql = format!(
                 "SELECT postings.source_id, postings.id, accounts.id, accounts.name, postings.amount
                  FROM postings
-                 JOIN accounts ON accounts.id = postings.account_id
-                 WHERE postings.source_id IN ({placeholders}) AND postings.account_id != ?
+                 LEFT JOIN accounts ON accounts.id = postings.account_id
+                 WHERE postings.source_id IN ({placeholders})
                  ORDER BY postings.source_id, accounts.name, postings.id"
             );
-            let mut values: Vec<SqlValue> = transactions
+            let values: Vec<SqlValue> = transactions
                 .iter()
                 .map(|transaction| SqlValue::Text(transaction.source_id.clone()))
                 .collect();
-            values.push(SqlValue::Text(account_id.to_owned()));
             let mut other_statement = self.connection.prepare(&sql)?;
             let rows = other_statement.query_map(params_from_iter(values.iter()), |row| {
                 Ok((
@@ -477,7 +722,9 @@ impl Database {
             })?;
             for row in rows {
                 let (source_id, posting) = row?;
-                if let Some(index) = indexes.get(&source_id) {
+                if let Some(index) = indexes.get(&source_id)
+                    && posting.posting_id != transactions[*index].posting_id
+                {
                     transactions[*index].other_postings.push(posting);
                 }
             }
@@ -512,6 +759,7 @@ impl Database {
                     accounts.parent_id,
                     accounts.external_id,
                     accounts.name,
+                    accounts.imported_name,
                     accounts.type,
                     accounts.latest_external_transaction_id,
                     (SELECT COALESCE(SUM(postings.amount), 0)
@@ -526,10 +774,11 @@ impl Database {
                         row.get::<_, Option<String>>(1)?,
                         row.get::<_, Option<String>>(2)?,
                         row.get::<_, String>(3)?,
-                        row.get::<_, String>(4)?,
-                        row.get::<_, Option<String>>(5)?,
-                        row.get::<_, i64>(6)?,
-                        row.get::<_, bool>(7)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                        row.get::<_, i64>(7)?,
+                        row.get::<_, bool>(8)?,
                     ))
                 },
             )
@@ -541,6 +790,7 @@ impl Database {
                     parent_id,
                     external_id,
                     name,
+                    imported_name,
                     account_type,
                     latest,
                     balance,
@@ -551,6 +801,7 @@ impl Database {
                         parent_id,
                         external_id,
                         name,
+                        imported_name,
                         account_type: AccountType::parse(&account_type)?,
                         latest_external_transaction_id: latest,
                         balance,
@@ -567,7 +818,9 @@ fn rebuild_projection(tx: &Transaction<'_>, source_id: &str) -> Result<(), Datab
     let projection = reduce(source_id, &source.transaction, &changes)?;
 
     for posting in &projection.postings {
-        ensure_account(tx, &posting.posting.account_id)?;
+        if let Some(account_id) = &posting.posting.account_id {
+            ensure_account(tx, account_id)?;
+        }
     }
     tx.execute("DELETE FROM postings WHERE source_id = ?", [source_id])?;
     for posting in projection.postings {
@@ -592,7 +845,9 @@ fn rebuild_projection(tx: &Transaction<'_>, source_id: &str) -> Result<(), Datab
 
 fn upsert_source(tx: &Transaction<'_>, id: &str, input: &SourceInput) -> Result<(), DatabaseError> {
     crate::model::validate_source(id, input)?;
-    ensure_account(tx, &input.transaction.account_id)?;
+    if let Some(account_id) = &input.transaction.account_id {
+        ensure_account(tx, account_id)?;
+    }
     tx.execute(
         "INSERT INTO transactions_source (
             id, source, external_account_id, external_transaction_id, account_id, date,
@@ -641,7 +896,7 @@ fn imported_source(
         external_account_id: account.external_id.clone().unwrap_or_default(),
         external_transaction_id: transaction.id.clone(),
         transaction: SourceTransactionData {
-            account_id: account.id.clone(),
+            account_id: Some(account.id.clone()),
             date: transaction.date.clone(),
             payee: transaction.payee.clone(),
             amount: transaction.amount,
@@ -739,6 +994,84 @@ fn ensure_account(connection: &Connection, id: &str) -> Result<(), DatabaseError
         .query_row("SELECT 1 FROM accounts WHERE id = ?", [id], |_| Ok(()))
         .optional()?
         .ok_or_else(|| ModelError::UnknownAccount(id.to_owned()).into())
+}
+
+fn descendant_account_ids(
+    connection: &Connection,
+    account_id: &str,
+) -> Result<Vec<String>, DatabaseError> {
+    let mut statement = connection.prepare(
+        "WITH RECURSIVE descendants(id) AS (
+            SELECT ?1
+            UNION ALL
+            SELECT accounts.id
+            FROM descendants
+            JOIN accounts ON accounts.parent_id = descendants.id
+         )
+         SELECT id FROM descendants",
+    )?;
+    let rows = statement.query_map([account_id], |row| row.get(0))?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+fn delete_accounts(
+    tx: &Transaction<'_>,
+    account_ids: &[String],
+    delete_transactions: bool,
+) -> Result<AccountDeletion, DatabaseError> {
+    let placeholders = std::iter::repeat_n("?", account_ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let account_values: Vec<SqlValue> = account_ids.iter().cloned().map(SqlValue::Text).collect();
+    let posting_sql =
+        format!("SELECT id, source_id FROM postings WHERE account_id IN ({placeholders})");
+    let posting_rows = {
+        let mut statement = tx.prepare(&posting_sql)?;
+        let rows = statement.query_map(params_from_iter(account_values.iter()), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    let affected_sources: HashSet<String> = posting_rows
+        .iter()
+        .map(|(_, source_id)| source_id.clone())
+        .collect();
+
+    let deleted_transactions = if delete_transactions {
+        for source_id in &affected_sources {
+            tx.execute("DELETE FROM transactions_source WHERE id = ?", [source_id])?;
+        }
+        affected_sources.len()
+    } else {
+        for (posting_id, source_id) in &posting_rows {
+            tx.execute(
+                "INSERT INTO transactions_changes (
+                    source_id, operation, target_id, field, value_json
+                 ) VALUES (?, 'set', ?, 'account_id', 'null')",
+                params![source_id, posting_id],
+            )?;
+        }
+        let source_sql = format!(
+            "UPDATE transactions_source SET account_id = NULL WHERE account_id IN ({placeholders})"
+        );
+        tx.execute(&source_sql, params_from_iter(account_values.iter()))?;
+        for source_id in &affected_sources {
+            rebuild_projection(tx, source_id)?;
+        }
+        0
+    };
+
+    let delete_sql = format!("DELETE FROM accounts WHERE id IN ({placeholders})");
+    tx.execute(&delete_sql, params_from_iter(account_values.iter()))?;
+    Ok(AccountDeletion {
+        accounts: account_ids.len(),
+        transactions: deleted_transactions,
+        nulled_postings: if delete_transactions {
+            0
+        } else {
+            posting_rows.len()
+        },
+    })
 }
 
 fn load_source(connection: &Connection, id: &str) -> Result<SourceRecord, DatabaseError> {
