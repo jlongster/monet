@@ -38,6 +38,32 @@ request and response contract is documented in the architecture note.
 The current decisions, operation model, HTTP API, and implementation checklist live in
 `/mnt/life/projects/finance-app-architecture.md`.
 
+## Inference
+
+Monet creates its user configuration at `~/.config/monet/config.json`. Override the path with
+`MONET_CONFIG_PATH`. Inference plugins are directly executable commands that speak JSON-RPC 2.0 as
+newline-delimited JSON over stdin/stdout.
+
+Configure the bundled OpenCode plugin manually:
+
+```json
+{
+  "inference": {
+    "command": ["bun", "inference-plugins/opencode/index.ts"],
+    "cwd": "/absolute/path/to/monet",
+    "env": [],
+    "config": {},
+    "model": null,
+    "initializeTimeoutMs": 5000,
+    "requestTimeoutMs": 60000
+  }
+}
+```
+
+The Inference screen discovers models, tests generation, and restarts the configured process. Command
+and plugin-specific settings remain file-owned. See [Inference plugins](docs/inference-plugins.md) for
+the protocol and JavaScript SDK.
+
 ## Terminal Control
 
 Run Monet in a shared Terminal Control workspace to use it in a real terminal while agents can

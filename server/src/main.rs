@@ -1,4 +1,6 @@
+mod config;
 mod db;
+mod inference;
 mod model;
 mod perf;
 
@@ -21,11 +23,15 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    config::{ConfigError, ConfigFile},
     db::{Database, DatabaseError},
+    inference::{InferenceError, InferenceManager},
     model::{
         AccountCursor, AccountDeletion, AccountInput, AccountRecord, AccountTransactionsPage,
-        ChangesInput, ImportConfig, ImportConfigInput, ImportSummary, ImportedAccounts,
-        ImportedTransactions, ModelError, SourceBundle, SourceInput,
+        AccountType, ChangesInput, ImportConfig, ImportConfigInput, ImportSummary,
+        ImportedAccounts, ImportedTransactions, InferenceConfig, InferenceConfigFile,
+        InferenceGenerateInput, InferenceGenerateOutput, InferenceModelInput, InferenceModels,
+        InferenceStatus, ModelError, SourceBundle, SourceInput,
     },
 };
 
@@ -33,6 +39,8 @@ use crate::{
 struct AppState {
     database: Arc<Mutex<Database>>,
     http: reqwest::Client,
+    inference: Arc<InferenceManager>,
+    config: Arc<ConfigFile>,
 }
 
 #[derive(Serialize)]
@@ -55,6 +63,8 @@ struct AccountPageQuery {
     limit: Option<usize>,
     before_date: Option<String>,
     before_source_id: Option<String>,
+    account_types: Option<String>,
+    search: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -63,37 +73,73 @@ struct DeleteAccountQuery {
     delete_transactions: bool,
 }
 
-struct ApiError(DatabaseError);
+enum ApiError {
+    Database(DatabaseError),
+    Inference(InferenceError),
+    Config(ConfigError),
+}
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let status = match self.0 {
-            DatabaseError::SourceNotFound(_) | DatabaseError::AccountNotFound(_) => {
-                StatusCode::NOT_FOUND
+        let (status, message) = match self {
+            Self::Database(error) => {
+                let status = match error {
+                    DatabaseError::SourceNotFound(_) | DatabaseError::AccountNotFound(_) => {
+                        StatusCode::NOT_FOUND
+                    }
+                    DatabaseError::ImportNotConfigured => StatusCode::NOT_FOUND,
+                    DatabaseError::Model(_)
+                    | DatabaseError::Json(_)
+                    | DatabaseError::InvalidImportUrl(_)
+                    | DatabaseError::SyncedAccountDeletion(_)
+                    | DatabaseError::SyncedAccountStructure(_)
+                    | DatabaseError::CategoryTransactionDeletion => {
+                        StatusCode::UNPROCESSABLE_ENTITY
+                    }
+                    DatabaseError::ImportRequest(_) => StatusCode::BAD_GATEWAY,
+                    DatabaseError::Sql(_) | DatabaseError::Poisoned => {
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    }
+                };
+                (status, error.to_string())
             }
-            DatabaseError::ImportNotConfigured => StatusCode::NOT_FOUND,
-            DatabaseError::Model(_)
-            | DatabaseError::Json(_)
-            | DatabaseError::InvalidImportUrl(_)
-            | DatabaseError::SyncedAccountDeletion(_)
-            | DatabaseError::SyncedAccountStructure(_)
-            | DatabaseError::CategoryTransactionDeletion => StatusCode::UNPROCESSABLE_ENTITY,
-            DatabaseError::ImportRequest(_) => StatusCode::BAD_GATEWAY,
-            DatabaseError::Sql(_) | DatabaseError::Poisoned => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Inference(error) => {
+                let status = match error {
+                    InferenceError::NotConfigured => StatusCode::NOT_FOUND,
+                    InferenceError::InvalidCommand | InferenceError::Protocol(_) => {
+                        StatusCode::UNPROCESSABLE_ENTITY
+                    }
+                    InferenceError::Timeout => StatusCode::GATEWAY_TIMEOUT,
+                    InferenceError::Launch(_)
+                    | InferenceError::Io(_)
+                    | InferenceError::Json(_)
+                    | InferenceError::Exited
+                    | InferenceError::MessageTooLarge
+                    | InferenceError::Remote { .. } => StatusCode::BAD_GATEWAY,
+                };
+                (status, error.to_string())
+            }
+            Self::Config(error) => (StatusCode::UNPROCESSABLE_ENTITY, error.to_string()),
         };
-        (
-            status,
-            Json(ErrorBody {
-                error: self.0.to_string(),
-            }),
-        )
-            .into_response()
+        (status, Json(ErrorBody { error: message })).into_response()
     }
 }
 
 impl From<DatabaseError> for ApiError {
     fn from(error: DatabaseError) -> Self {
-        Self(error)
+        Self::Database(error)
+    }
+}
+
+impl From<InferenceError> for ApiError {
+    fn from(error: InferenceError) -> Self {
+        Self::Inference(error)
+    }
+}
+
+impl From<ConfigError> for ApiError {
+    fn from(error: ConfigError) -> Self {
+        Self::Config(error)
     }
 }
 
@@ -106,7 +152,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let address: SocketAddr = env::var("MONET_SERVER_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:47832".into())
         .parse()?;
-    let app = create_router(Database::open(&database_path)?);
+    let app = create_router(Database::open(&database_path)?, ConfigFile::open()?);
 
     let listener = tokio::net::TcpListener::bind(address).await?;
     println!("monet server listening on http://{address}");
@@ -116,11 +162,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn create_router(database: Database) -> Router {
+fn create_router(database: Database, config: ConfigFile) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/import", put(configure_import).get(get_import))
         .route("/import/run", post(run_import))
+        .route("/inference", get(get_inference))
+        .route("/inference/status", get(inference_status))
+        .route("/inference/models", get(inference_models))
+        .route("/inference/model", put(update_inference_model))
+        .route("/inference/generate", post(inference_generate))
+        .route("/inference/restart", post(inference_restart))
         .route("/accounts", get(list_accounts))
         .route("/transactions", get(list_transactions))
         .route(
@@ -150,6 +202,8 @@ fn create_router(database: Database) -> Router {
         .with_state(AppState {
             database: Arc::new(Mutex::new(database)),
             http: reqwest::Client::new(),
+            inference: Arc::new(InferenceManager::default()),
+            config: Arc::new(config),
         })
 }
 
@@ -196,6 +250,57 @@ async fn get_import(State(state): State<AppState>) -> Result<Json<ImportConfig>,
     Ok(Json(database.get_import()?))
 }
 
+async fn get_inference(
+    State(state): State<AppState>,
+) -> Result<Json<InferenceConfigFile>, ApiError> {
+    Ok(Json(InferenceConfigFile {
+        path: state.config.path(),
+        inference: state.config.load()?.inference,
+    }))
+}
+
+fn require_inference_config(state: &AppState) -> Result<InferenceConfig, ApiError> {
+    state
+        .config
+        .load()?
+        .inference
+        .ok_or_else(|| InferenceError::NotConfigured.into())
+}
+
+async fn inference_status(
+    State(state): State<AppState>,
+) -> Result<Json<InferenceStatus>, ApiError> {
+    let config = require_inference_config(&state)?;
+    Ok(Json(state.inference.status(config).await?))
+}
+
+async fn inference_models(
+    State(state): State<AppState>,
+) -> Result<Json<InferenceModels>, ApiError> {
+    let config = require_inference_config(&state)?;
+    Ok(Json(state.inference.models(config).await?))
+}
+
+async fn update_inference_model(
+    State(state): State<AppState>,
+    Json(input): Json<InferenceModelInput>,
+) -> Result<Json<InferenceConfig>, ApiError> {
+    Ok(Json(state.config.set_inference_model(input.model)?))
+}
+
+async fn inference_generate(
+    State(state): State<AppState>,
+    Json(input): Json<InferenceGenerateInput>,
+) -> Result<Json<InferenceGenerateOutput>, ApiError> {
+    let config = require_inference_config(&state)?;
+    Ok(Json(state.inference.generate(config, input).await?))
+}
+
+async fn inference_restart(State(state): State<AppState>) -> Json<Health> {
+    state.inference.restart().await;
+    Json(Health { healthy: true })
+}
+
 async fn run_import(State(state): State<AppState>) -> Result<Json<ImportSummary>, ApiError> {
     let config = {
         let database = state.database.lock().map_err(|_| DatabaseError::Poisoned)?;
@@ -232,11 +337,19 @@ async fn run_import(State(state): State<AppState>) -> Result<Json<ImportSummary>
             segments.push(external_id);
             segments.push("transactions");
         }
-        let start_date = {
+        let initial = {
             let database = state.database.lock().map_err(|_| DatabaseError::Poisoned)?;
-            database.account_sync_start_date(&account.id)?
+            database.account_needs_initial_sync(&account.id)?
         };
-        url.query_pairs_mut().append_pair("start_date", &start_date);
+        if initial {
+            url.query_pairs_mut().append_pair("initial", "true");
+        } else {
+            let start_date = {
+                let database = state.database.lock().map_err(|_| DatabaseError::Poisoned)?;
+                database.account_sync_start_date(&account.id)?
+            };
+            url.query_pairs_mut().append_pair("start_date", &start_date);
+        }
         let imported: ImportedTransactions = fetch_json(&state.http, url).await?;
         let (transactions, deleted_pending) = {
             let mut database = state.database.lock().map_err(|_| DatabaseError::Poisoned)?;
@@ -332,12 +445,13 @@ async fn list_account_transactions(
     AxumPath(account_id): AxumPath<String>,
     Query(query): Query<AccountPageQuery>,
 ) -> Result<Json<AccountTransactionsPage>, ApiError> {
-    let (limit, before) = transaction_page(query)?;
+    let (limit, before, _, search) = transaction_page(query)?;
     let database = state.database.lock().map_err(|_| DatabaseError::Poisoned)?;
     Ok(Json(database.list_account(
         &account_id,
         limit,
         before.as_ref(),
+        search.as_deref(),
     )?))
 }
 
@@ -345,34 +459,53 @@ async fn list_transactions(
     State(state): State<AppState>,
     Query(query): Query<AccountPageQuery>,
 ) -> Result<Json<AccountTransactionsPage>, ApiError> {
-    let (limit, before) = transaction_page(query)?;
+    let (limit, before, account_types, search) = transaction_page(query)?;
     let database = state.database.lock().map_err(|_| DatabaseError::Poisoned)?;
-    Ok(Json(
-        database.list_all_transactions(limit, before.as_ref())?,
-    ))
+    Ok(Json(database.list_all_transactions(
+        limit,
+        before.as_ref(),
+        account_types.as_deref(),
+        search.as_deref(),
+    )?))
 }
 
 async fn list_unbalanced_transactions(
     State(state): State<AppState>,
     Query(query): Query<AccountPageQuery>,
 ) -> Result<Json<AccountTransactionsPage>, ApiError> {
-    let (limit, before) = transaction_page(query)?;
+    let (limit, before, account_types, search) = transaction_page(query)?;
     let database = state.database.lock().map_err(|_| DatabaseError::Poisoned)?;
-    Ok(Json(
-        database.list_unbalanced_transactions(limit, before.as_ref())?,
-    ))
+    Ok(Json(database.list_unbalanced_transactions(
+        limit,
+        before.as_ref(),
+        account_types.as_deref(),
+        search.as_deref(),
+    )?))
 }
 
 async fn count_unbalanced_transactions(
     State(state): State<AppState>,
+    Query(query): Query<AccountPageQuery>,
 ) -> Result<Json<TransactionCount>, ApiError> {
+    let (_, _, account_types, search) = transaction_page(query)?;
     let database = state.database.lock().map_err(|_| DatabaseError::Poisoned)?;
     Ok(Json(TransactionCount {
-        count: database.count_unbalanced_transactions()?,
+        count: database
+            .count_unbalanced_transactions(account_types.as_deref(), search.as_deref())?,
     }))
 }
 
-fn transaction_page(query: AccountPageQuery) -> Result<(usize, Option<AccountCursor>), ApiError> {
+fn transaction_page(
+    query: AccountPageQuery,
+) -> Result<
+    (
+        usize,
+        Option<AccountCursor>,
+        Option<Vec<AccountType>>,
+        Option<String>,
+    ),
+    ApiError,
+> {
     let before = match (query.before_date, query.before_source_id) {
         (Some(date), Some(source_id)) => Some(AccountCursor { date, source_id }),
         (None, None) => None,
@@ -384,7 +517,22 @@ fn transaction_page(query: AccountPageQuery) -> Result<(usize, Option<AccountCur
             .into());
         }
     };
-    Ok((query.limit.unwrap_or(50).clamp(1, 100), before))
+    let account_types = query
+        .account_types
+        .map(|types| {
+            types
+                .split(',')
+                .map(AccountType::parse)
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()
+        .map_err(DatabaseError::from)?;
+    Ok((
+        query.limit.unwrap_or(50).clamp(1, 100),
+        before,
+        account_types,
+        query.search,
+    ))
 }
 
 async fn shutdown_signal() {
@@ -427,15 +575,23 @@ mod tests {
     struct FakeImportState {
         account_requests: Arc<Mutex<usize>>,
         start_dates: Arc<Mutex<Vec<Option<String>>>>,
+        initial_requests: Arc<Mutex<Vec<bool>>>,
     }
 
     #[derive(Deserialize)]
     struct ImportQuery {
         start_date: Option<String>,
+        #[serde(default)]
+        initial: bool,
     }
 
     fn test_app() -> Router {
-        create_router(Database::open(":memory:").unwrap())
+        let path =
+            std::env::temp_dir().join(format!("monet-test-config-{}.json", std::process::id()));
+        create_router(
+            Database::open(":memory:").unwrap(),
+            ConfigFile::at(path).unwrap(),
+        )
     }
 
     fn source(amount: i64, payee: &str) -> Value {
@@ -672,6 +828,108 @@ mod tests {
         assert_eq!(root["name"], "Home");
         assert_eq!(root["parent_id"], Value::Null);
         assert_eq!(root["type"], "income");
+    }
+
+    #[tokio::test]
+    async fn virtual_registers_filter_by_account_type() {
+        let app = test_app();
+        setup_accounts(&app).await;
+        put_source(&app, -10_000, "Target").await;
+
+        let (status, asset_count) = request(
+            &app,
+            Method::GET,
+            "/transactions/unbalanced/count?account_types=asset,liability,equity",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(asset_count["count"], 1);
+        let (status, expense_count) = request(
+            &app,
+            Method::GET,
+            "/transactions/unbalanced/count?account_types=income,expense",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(expense_count["count"], 0);
+
+        let (status, _) = request(
+            &app,
+            Method::POST,
+            &format!("/sources/{SOURCE_ID}/changes"),
+            Some(json!({
+                "changes": [
+                    {
+                        "operation": "set",
+                        "target_id": SOURCE_ID,
+                        "field": "payee",
+                        "value": "Renamed"
+                    },
+                    {
+                        "operation": "set",
+                        "target_id": SOURCE_ID,
+                        "field": "notes",
+                        "value": "Birthday trip"
+                    }
+                ]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        for search in ["target", "renamed", "birthday%20trip", "100.00"] {
+            let (status, matches) = request(
+                &app,
+                Method::GET,
+                &format!("/transactions?account_types=asset,liability,equity&search={search}"),
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(matches["transactions"].as_array().unwrap().len(), 1);
+        }
+        let (status, no_matches) = request(
+            &app,
+            Method::GET,
+            "/transactions?account_types=asset,liability,equity&search=payroll",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(no_matches["transactions"].as_array().unwrap().is_empty());
+
+        let (status, _) = request(
+            &app,
+            Method::POST,
+            &format!("/sources/{SOURCE_ID}/changes"),
+            Some(split_changes(10_000, None)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, assets) = request(
+            &app,
+            Method::GET,
+            "/transactions?account_types=asset,liability,equity",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(assets["transactions"][0]["account_id"], CHECKING_ID);
+        assert_eq!(assets["transactions"][0]["amount"], -10_000);
+
+        let (status, expenses) = request(
+            &app,
+            Method::GET,
+            "/transactions?account_types=income,expense",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(expenses["transactions"][0]["account_id"], GROCERIES_ID);
+        assert_eq!(expenses["transactions"][0]["amount"], 10_000);
     }
 
     #[tokio::test]
@@ -1184,6 +1442,7 @@ mod tests {
                     "latest": null
                 }));
             }
+            state.initial_requests.lock().unwrap().push(query.initial);
             let mut requests = state.start_dates.lock().unwrap();
             requests.push(query.start_date.clone());
             if requests.len() == 1 {
@@ -1233,6 +1492,7 @@ mod tests {
         let fake_state = FakeImportState {
             account_requests: Arc::new(Mutex::new(0)),
             start_dates: Arc::new(Mutex::new(Vec::new())),
+            initial_requests: Arc::new(Mutex::new(Vec::new())),
         };
         let fake_app = Router::new()
             .route("/accounts", get(accounts))
@@ -1344,7 +1604,11 @@ mod tests {
             .to_owned();
         assert_eq!(
             fake_state.start_dates.lock().unwrap().as_slice(),
-            &[Some("2026-01-01".into()), Some("2026-07-12".into())]
+            &[None, Some("2026-07-12".into())]
+        );
+        assert_eq!(
+            fake_state.initial_requests.lock().unwrap().as_slice(),
+            &[true, false]
         );
 
         let (status, third) = request(&app, Method::POST, "/import/run", None).await;

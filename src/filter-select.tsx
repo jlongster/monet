@@ -113,7 +113,7 @@ export function FilterSelect<Value extends string>({
   })
 
   return (
-    <box ref={anchorRef} style={{ height: 1, width: "100%", position: "relative" }}>
+    <box id={`${id}-anchor`} ref={anchorRef} style={{ height: 1, width: "100%", position: "relative" }}>
       {open ? (
         <box
           style={{

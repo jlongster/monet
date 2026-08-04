@@ -71,6 +71,115 @@ pub struct ImportConfig {
     pub url: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct InferenceConfig {
+    pub command: Vec<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub env: Vec<String>,
+    #[serde(default)]
+    pub config: Value,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default = "default_initialize_timeout_ms")]
+    pub initialize_timeout_ms: u64,
+    #[serde(default = "default_request_timeout_ms")]
+    pub request_timeout_ms: u64,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct MonetConfig {
+    #[serde(default)]
+    pub inference: Option<InferenceConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct InferenceConfigFile {
+    pub path: String,
+    pub inference: Option<InferenceConfig>,
+}
+
+fn default_initialize_timeout_ms() -> u64 {
+    5_000
+}
+
+fn default_request_timeout_ms() -> u64 {
+    60_000
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct InferencePluginInfo {
+    pub name: String,
+    pub version: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct InferenceCapabilities {
+    pub inference: bool,
+    #[serde(default)]
+    pub structured_output: bool,
+    #[serde(default)]
+    pub cancellation: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct InferenceStatus {
+    pub ready: bool,
+    pub detail: Option<String>,
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub setup: Value,
+    pub plugin: Option<InferencePluginInfo>,
+    pub capabilities: Option<InferenceCapabilities>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct InferenceModel {
+    pub id: String,
+    pub name: String,
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub capabilities: Value,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct InferenceModels {
+    pub models: Vec<InferenceModel>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct InferenceModelInput {
+    pub model: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct InferenceGenerateInput {
+    pub model: Option<String>,
+    pub system: Option<String>,
+    pub prompt: String,
+    pub output_schema: Option<Value>,
+    pub timeout_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct InferenceGenerateOutput {
+    pub text: String,
+    pub structured: Option<Value>,
+    pub model: String,
+    #[serde(default)]
+    pub usage: Value,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ImportedAccount {
     pub id: String,

@@ -48,6 +48,7 @@ export function Popover({
 
   return createPortal(
     <box
+      buffered
       style={{
         position: "absolute",
         top: anchor.screenY - target.screenY + anchor.height,
@@ -61,5 +62,6 @@ export function Popover({
     </box>,
     target,
     null,
+    anchor.id,
   )
 }

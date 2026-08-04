@@ -391,6 +391,19 @@ impl Database {
             .map_err(Into::into)
     }
 
+    pub fn account_needs_initial_sync(&self, account_id: &str) -> Result<bool, DatabaseError> {
+        ensure_account(&self.connection, account_id)?;
+        self.connection
+            .query_row(
+                "SELECT NOT EXISTS(
+                    SELECT 1 FROM transactions_source WHERE account_id = ?
+                 )",
+                [account_id],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
     pub fn list_accounts(&self) -> Result<Vec<AccountRecord>, DatabaseError> {
         let mut statement = self.connection.prepare(
             "WITH RECURSIVE descendants(root_id, id) AS (
@@ -532,39 +545,84 @@ impl Database {
         account_id: &str,
         limit: usize,
         before: Option<&AccountCursor>,
+        search: Option<&str>,
     ) -> Result<AccountTransactionsPage, DatabaseError> {
         ensure_account(&self.connection, account_id)?;
-        self.list_transactions(Some(account_id), limit, before, false)
+        self.list_transactions(Some(account_id), limit, before, false, None, search)
     }
 
     pub fn list_all_transactions(
         &self,
         limit: usize,
         before: Option<&AccountCursor>,
+        account_types: Option<&[AccountType]>,
+        search: Option<&str>,
     ) -> Result<AccountTransactionsPage, DatabaseError> {
-        self.list_transactions(None, limit, before, false)
+        self.list_transactions(None, limit, before, false, account_types, search)
     }
 
     pub fn list_unbalanced_transactions(
         &self,
         limit: usize,
         before: Option<&AccountCursor>,
+        account_types: Option<&[AccountType]>,
+        search: Option<&str>,
     ) -> Result<AccountTransactionsPage, DatabaseError> {
-        self.list_transactions(None, limit, before, true)
+        self.list_transactions(None, limit, before, true, account_types, search)
     }
 
-    pub fn count_unbalanced_transactions(&self) -> Result<usize, DatabaseError> {
+    pub fn count_unbalanced_transactions(
+        &self,
+        account_types: Option<&[AccountType]>,
+        search: Option<&str>,
+    ) -> Result<usize, DatabaseError> {
+        let account_types = account_types.map(|types| {
+            types
+                .iter()
+                .map(|account_type| account_type.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        });
+        let search = search
+            .map(str::trim)
+            .filter(|search| !search.is_empty())
+            .map(|search| format!("%{}%", search.to_lowercase()));
         self.connection
             .query_row(
                 "SELECT COUNT(*)
-                 FROM (
-                    SELECT source_id
-                    FROM postings
-                    GROUP BY source_id
-                    HAVING SUM(amount) != 0
-                        OR SUM(CASE WHEN account_id IS NULL THEN 1 ELSE 0 END) > 0
-                 )",
-                [],
+                  FROM (
+                     SELECT source_id
+                     FROM postings
+                     GROUP BY source_id
+                     HAVING SUM(amount) != 0
+                         OR SUM(CASE WHEN account_id IS NULL THEN 1 ELSE 0 END) > 0
+                  ) AS unbalanced
+                  WHERE (
+                    ?1 IS NULL OR EXISTS (
+                      SELECT 1
+                      FROM postings AS typed_posting
+                      JOIN accounts AS typed_account ON typed_account.id = typed_posting.account_id
+                      WHERE typed_posting.source_id = unbalanced.source_id
+                        AND instr(',' || ?1 || ',', ',' || typed_account.type || ',') > 0
+                    )
+                  )
+                  AND (
+                    ?2 IS NULL OR EXISTS (
+                      SELECT 1
+                      FROM postings AS search_posting
+                      JOIN transactions_source AS search_source ON search_source.id = search_posting.source_id
+                      WHERE search_posting.source_id = unbalanced.source_id
+                        AND (
+                          lower(COALESCE(search_posting.payee, '')) LIKE ?2
+                          OR lower(COALESCE(search_source.payee, '')) LIKE ?2
+                          OR lower(COALESCE(search_posting.notes, '')) LIKE ?2
+                          OR lower(COALESCE(search_source.notes, '')) LIKE ?2
+                          OR printf('%.2f', search_posting.amount / 100.0) LIKE ?2
+                          OR printf('%.2f', ABS(search_posting.amount) / 100.0) LIKE ?2
+                        )
+                    )
+                  )",
+                params![account_types, search],
                 |row| row.get(0),
             )
             .map_err(Into::into)
@@ -576,6 +634,8 @@ impl Database {
         limit: usize,
         before: Option<&AccountCursor>,
         unbalanced: bool,
+        account_types: Option<&[AccountType]>,
+        search: Option<&str>,
     ) -> Result<AccountTransactionsPage, DatabaseError> {
         let total_started = Instant::now();
         let base_started = Instant::now();
@@ -607,7 +667,12 @@ impl Database {
                     ) AS source_rank
                 FROM postings
                 LEFT JOIN descendants ON descendants.id = postings.account_id
+                LEFT JOIN accounts AS posting_account ON posting_account.id = postings.account_id
                 WHERE (?5 = 1 OR descendants.id IS NOT NULL)
+                  AND (
+                    ?6 IS NULL
+                    OR instr(',' || ?6 || ',', ',' || posting_account.type || ',') > 0
+                  )
                   AND (
                     ?5 = 0
                     OR postings.source_id IN (
@@ -622,6 +687,22 @@ impl Database {
                     ?2 IS NULL
                     OR postings.date < ?2
                     OR (postings.date = ?2 AND postings.source_id < ?3)
+                  )
+                  AND (
+                    ?7 IS NULL OR EXISTS (
+                      SELECT 1
+                      FROM postings AS search_posting
+                      JOIN transactions_source AS search_source ON search_source.id = search_posting.source_id
+                      WHERE search_posting.source_id = postings.source_id
+                        AND (
+                          lower(COALESCE(search_posting.payee, '')) LIKE ?7
+                          OR lower(COALESCE(search_source.payee, '')) LIKE ?7
+                          OR lower(COALESCE(search_posting.notes, '')) LIKE ?7
+                          OR lower(COALESCE(search_source.notes, '')) LIKE ?7
+                          OR printf('%.2f', search_posting.amount / 100.0) LIKE ?7
+                          OR printf('%.2f', ABS(search_posting.amount) / 100.0) LIKE ?7
+                        )
+                    )
                   )
              ), account_rows AS (
                 SELECT source_id, id, account_id, date, payee, amount, pending, notes
@@ -648,13 +729,26 @@ impl Database {
         )?;
         let before_date = before.map(|cursor| cursor.date.as_str());
         let before_source_id = before.map(|cursor| cursor.source_id.as_str());
+        let account_types = account_types.map(|types| {
+            types
+                .iter()
+                .map(|account_type| account_type.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        });
+        let search = search
+            .map(str::trim)
+            .filter(|search| !search.is_empty())
+            .map(|search| format!("%{}%", search.to_lowercase()));
         let rows = statement.query_map(
             params![
                 account_id,
                 before_date,
                 before_source_id,
                 limit + 1,
-                unbalanced
+                unbalanced,
+                account_types,
+                search,
             ],
             |row| {
                 Ok(AccountTransaction {

@@ -8,7 +8,9 @@ import {
   ALL_TRANSACTIONS_ID,
   UNBALANCED_TRANSACTIONS_ID,
   type Account,
+  type AccountView,
   type TransactionChange,
+  accountViewAtom,
   accountTypes,
   assignmentAccountsAtom,
   assignToAccount,
@@ -30,6 +32,8 @@ import {
   selectBufferedTransaction,
   selectTransaction,
   setAccountCollapsed,
+  setAccountView,
+  setTransactionSearch,
   selectedAccountAtom,
   selectedTransactionAtom,
   saveTransactionChanges,
@@ -39,10 +43,12 @@ import {
   stateAtom,
   sync,
   toggleFocus,
+  transactionSearchAtom,
 } from "./store"
 import { FilterSelect, type FilterSelectOption } from "./filter-select"
 import { moveOrderedFocus } from "./focus-order"
 import { FormButton, FormField } from "./form"
+import { InferenceSettings } from "./inference-settings"
 import { PopoverProvider } from "./popover"
 import { scrollTopForRange } from "./selection-scroll"
 import { gray, selectionBackground } from "./theme"
@@ -194,6 +200,8 @@ export function App() {
   const virtualAccountSelected = allTransactionsSelected || unbalancedTransactionsSelected
   const showAccountColumn = virtualAccountSelected || (selectedAccount?.has_children ?? false)
   const financialAccounts = useAtomValue(financialAccountsAtom)
+  const accountView = useAtomValue(accountViewAtom)
+  const transactionSearch = useAtomValue(transactionSearchAtom)
   const financialAccountLayoutKey = financialAccounts.map((account) => account.id).join("\0")
   const collapsedAccountIds = useAtomValue(collapsedAccountIdsAtom)
   const selectedTransaction = useAtomValue(selectedTransactionAtom)
@@ -203,6 +211,7 @@ export function App() {
   const [openCreationSelect, setOpenCreationSelect] = useState<"parent" | "type" | null>(null)
   const [deletingAccount, setDeletingAccount] = useState<Account | null>(null)
   const [deletionChoice, setDeletionChoice] = useState<0 | 1>(0)
+  const [screen, setScreen] = useState<"ledger" | "inference">("ledger")
   const [transactionDraft, setTransactionDraft] = useState<TransactionDraft | null>(null)
   const [transactionEditorOpen, setTransactionEditorOpen] = useState(false)
   const [transactionEditing, setTransactionEditing] = useState(false)
@@ -216,6 +225,8 @@ export function App() {
   const [transactionEditorFocus, setTransactionEditorFocus] = useState("notes")
   const [openTransactionAccountSelect, setOpenTransactionAccountSelect] = useState<string | null>(null)
   const [transactionEditorError, setTransactionEditorError] = useState<string | null>(null)
+  const [searchDraft, setSearchDraft] = useState(transactionSearch)
+  const [searchFocused, setSearchFocused] = useState(false)
   const [notesHeight, setNotesHeight] = useState(3)
   const notesMeasureCallback = useRef<(() => void) | null>(null)
   const showAccountSidebar = terminalWidth >= ACCOUNT_SIDEBAR_WIDTH +
@@ -252,6 +263,8 @@ export function App() {
     (account) => account.external_id !== null,
   )
   const deletingCategory = deletingAccount?.type === "income" || deletingAccount?.type === "expense"
+  const registerVisible = !deletingAccount && !state.creatingAccount && !state.assigning
+  const showRegisterBalance = registerVisible && selectedAccount !== null && !virtualAccountSelected
   const parentOptions: FilterSelectOption<string>[] = [
     { value: NO_PARENT, label: "No parent", detail: editingAccount ? "top level" : "new root" },
     ...creationParents.filter((account) => !unavailableParentIds.has(account.id)).map((account) => ({
@@ -613,6 +626,16 @@ export function App() {
   }, [registry])
 
   useEffect(() => {
+    if (!searchFocused) setSearchDraft(transactionSearch)
+  }, [searchFocused, transactionSearch])
+
+  useEffect(() => {
+    if (searchDraft === transactionSearch) return
+    const timeout = setTimeout(() => setTransactionSearch(registry, searchDraft), 200)
+    return () => clearTimeout(timeout)
+  }, [registry, searchDraft, transactionSearch])
+
+  useEffect(() => {
     if (!state.creatingAccount) return
     setCreationField("name")
     setOpenCreationSelect(null)
@@ -726,6 +749,13 @@ export function App() {
   useKeyboard((key) => {
     const tabPressed = key.name === "tab" || key.name === "shift-tab"
     const reverseTab = key.shift || key.name === "shift-tab"
+    if (screen === "inference") return
+    if (searchFocused) {
+      if (key.name === "escape" || key.name === "return" || key.name === "enter") {
+        setSearchFocused(false)
+      }
+      return
+    }
     if (transactionDraft) {
       if (openTransactionAccountSelect) return
       if (key.name === "escape") cancelTransactionEditMode()
@@ -990,18 +1020,52 @@ export function App() {
     >
       <box
         style={{
-          height: 3,
-          paddingLeft: 2,
-          paddingRight: 2,
+          height: 1,
           flexDirection: "row",
-          alignItems: "center",
           justifyContent: "space-between",
           backgroundColor: gray[800],
         }}
       >
-        <text fg={gray[200]}>
-          <strong>MONET</strong>  ledger probe
-        </text>
+        <box style={{ height: 1, flexDirection: "row" }}>
+          {([
+            ["assets-liabilities", "Assets & Liabilities"],
+            ["income-expenses", "Income & Expenses"],
+          ] as const satisfies ReadonlyArray<readonly [AccountView, string]>).map(([value, label]) => {
+            const selected = screen === "ledger" && accountView === value
+            return (
+              <box
+                key={value}
+                id={`account-view-${value}`}
+                style={{
+                  height: 1,
+                  paddingLeft: 1,
+                  paddingRight: 1,
+                  backgroundColor: selected ? selectionBackground : gray[800],
+                }}
+                onMouseDown={transactionEditing || transactionDraft
+                  ? undefined
+                  : () => {
+                      setScreen("ledger")
+                      setAccountView(registry, value)
+                    }}
+              >
+                <text fg={selected ? gray[100] : gray[500]}>{label}</text>
+              </box>
+            )
+          })}
+          <box
+            id="screen-inference"
+            style={{
+              height: 1,
+              paddingLeft: 1,
+              paddingRight: 1,
+              backgroundColor: screen === "inference" ? selectionBackground : gray[800],
+            }}
+            onMouseDown={transactionEditing || transactionDraft ? undefined : () => setScreen("inference")}
+          >
+            <text fg={screen === "inference" ? gray[100] : gray[500]}>Inference</text>
+          </box>
+        </box>
         <box style={{ flexDirection: "row", gap: 2 }}>
           <text fg={state.error ? gray[300] : state.busy ? gray[400] : gray[500]}>
             {state.error ?? state.message}
@@ -1013,6 +1077,10 @@ export function App() {
       </box>
 
       <box style={{ flexGrow: 1, flexDirection: "row-reverse" }}>
+        {screen === "inference" ? (
+          <InferenceSettings />
+        ) : (
+        <>
         {transactionEditorOpen ? (
           <box
             title=" Edit transaction "
@@ -1419,8 +1487,14 @@ export function App() {
         </scrollbox> : null}
 
         <box style={{ flexGrow: 1, flexDirection: "column", padding: 1, gap: 1 }}>
-          <box style={{ height: 1, flexDirection: "row", justifyContent: "space-between" }}>
-            <text fg={gray[100]}>
+          <box
+            style={{
+              height: showRegisterBalance ? 2 : 1,
+              flexDirection: "column",
+            }}
+          >
+            <box style={{ height: 1, flexDirection: "row", justifyContent: "space-between" }}>
+              <text fg={gray[100]}>
               <strong>
                 {deletingAccount
                   ? "Delete account"
@@ -1447,22 +1521,45 @@ export function App() {
                 : selectedAccount && !virtualAccountSelected
                   ? `  /  ${selectedAccount.type}`
                   : ""}
-            </text>
-            <text fg={selectedAccount && accountBalance(selectedAccount) < 0 ? gray[300] : gray[200]}>
-              {deletingAccount
-                ? deletionContainsSyncedAccount
-                  ? "esc cancel"
-                  : "enter confirm / esc cancel"
-                : state.creatingAccount
-                ? `tab next / enter ${editingAccount ? "save" : "create"} / esc cancel`
-                : state.assigning
-                  ? state.choosingPosting
-                    ? "enter choose / esc cancel"
-                    : "a new / enter assign / esc cancel"
-                : selectedAccount && !virtualAccountSelected
-                  ? `${money(accountBalance(selectedAccount))} balance`
-                  : ""}
-            </text>
+              </text>
+              {registerVisible ? (
+                <input
+                  id="transaction-search"
+                  focused={searchFocused && !transactionEditing && !transactionDraft}
+                  value={searchDraft}
+                  placeholder="Search transactions"
+                  textColor={gray[100]}
+                  focusedTextColor={gray[100]}
+                  backgroundColor={gray[800]}
+                  focusedBackgroundColor={gray[700]}
+                  cursorColor={gray[200]}
+                  style={{ width: 30, paddingLeft: 1, paddingRight: 1 }}
+                  onMouseDown={transactionEditing || transactionDraft
+                    ? undefined
+                    : () => setSearchFocused(true)}
+                  onInput={setSearchDraft}
+                />
+              ) : (
+                <text fg={gray[500]}>
+                  {deletingAccount
+                    ? deletionContainsSyncedAccount
+                      ? "esc cancel"
+                      : "enter confirm / esc cancel"
+                    : state.creatingAccount
+                    ? `tab next / enter ${editingAccount ? "save" : "create"} / esc cancel`
+                    : state.assigning
+                      ? state.choosingPosting
+                        ? "enter choose / esc cancel"
+                        : "a new / enter assign / esc cancel"
+                      : ""}
+                </text>
+              )}
+            </box>
+            {showRegisterBalance ? (
+              <text fg={selectedAccount && accountBalance(selectedAccount) < 0 ? gray[300] : gray[200]}>
+                {money(accountBalance(selectedAccount))}
+              </text>
+            ) : null}
           </box>
 
           {deletingAccount ? (
@@ -1687,7 +1784,9 @@ export function App() {
                   const other = transaction.other_postings
                     .map((posting) => posting.account_name ?? "None")
                     .join(", ")
-                  const otherLabel = other
+                  const otherLabel = transaction.other_postings.length > 1
+                    ? "(split)"
+                    : other
                     ? transaction.unallocated_amount === 0
                       ? other
                       : `${other} + open`
@@ -1757,6 +1856,8 @@ export function App() {
           )}
         </box>
         </box>
+        </>
+        )}
       </box>
 
       <box
@@ -1769,13 +1870,15 @@ export function App() {
         }}
       >
         <text fg={gray[600]}>
-          {transactionEditing
+          {screen === "inference"
+            ? "inference settings"
+            : transactionEditing
               ? "transaction editor   tab field   esc read-only"
             : transactionEditorOpen
               ? "tab field   ↑/↓ move transactions when register is focused   esc close"
               : `${showAccountSidebar ? "tab pane   " : ""}↑/↓ move   a new   e edit   ${showAccountSidebar ? "d delete   " : ""}p/n page`}
         </text>
-        <text fg={gray[600]}>{transactionEditorOpen ? "" : "r refresh   s sync   q quit"}</text>
+        <text fg={gray[600]}>{screen === "inference" || transactionEditorOpen ? "" : "r refresh   s sync   q quit"}</text>
       </box>
     </box>
     </PopoverProvider>

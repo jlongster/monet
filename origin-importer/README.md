@@ -37,10 +37,10 @@ transactions using Monet's requested date window. It never polls or schedules wo
 Origin decimal-dollar transaction amounts are converted to Monet's signed integer cents at the
 HTTP boundary.
 
-Each account response includes one stable synthetic opening-balance transaction calculated as the
-reported current balance minus all activity in the imported date window. Asset balances retain
-their sign; Origin's positive amounts owed for liabilities are converted to negative ledger
-balances. Repeated syncs update the same `origin-opening:{account_id}` source.
+An explicit new-account request (`initial=true`) includes one stable synthetic opening-balance
+transaction calculated as the reported current balance minus all activity in the imported date
+window. Asset balances retain their sign; Origin's positive amounts owed for liabilities are
+converted to negative ledger balances. Incremental syncs never return the opening balance again.
 
 The current Origin client automatically refreshes its ID token through Cognito before expiry. The
 adapter serializes account and transaction fetches so one sync performs at most one refresh. Replace

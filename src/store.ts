@@ -19,6 +19,48 @@ export type AccountNode = Account & { depth: number }
 export const ALL_TRANSACTIONS_ID = "all-transactions"
 export const UNBALANCED_TRANSACTIONS_ID = "unbalanced-transactions"
 export const accountTypes = ["asset", "liability", "income", "expense", "equity"] as const
+export type AccountView = "assets-liabilities" | "income-expenses"
+
+export type InferenceConfig = {
+  command: string[]
+  cwd: string | null
+  env: string[]
+  config: unknown
+  model: string | null
+  initializeTimeoutMs: number
+  requestTimeoutMs: number
+}
+
+export type InferenceStatus = {
+  ready: boolean
+  detail?: string | null
+  reason?: string | null
+  setup?: unknown
+  plugin?: { name: string; version: string } | null
+  capabilities?: {
+    inference: boolean
+    structuredOutput: boolean
+    cancellation: boolean
+  } | null
+}
+
+export type InferenceModel = {
+  id: string
+  name: string
+  provider?: string | null
+  capabilities?: unknown
+}
+
+type InferenceUiState = {
+  configPath: string | null
+  config: InferenceConfig | null
+  status: InferenceStatus | null
+  models: InferenceModel[]
+  busy: boolean
+  message: string
+  error: string | null
+  testLog: string[]
+}
 
 const allTransactionsAccount: AccountNode = {
   id: ALL_TRANSACTIONS_ID,
@@ -131,6 +173,18 @@ const initialState: State = {
 
 export const stateAtom = Atom.make(initialState).pipe(Atom.keepAlive)
 export const collapsedAccountIdsAtom = Atom.make(new Set<string>() as ReadonlySet<string>).pipe(Atom.keepAlive)
+export const accountViewAtom = Atom.make("assets-liabilities" as AccountView).pipe(Atom.keepAlive)
+export const transactionSearchAtom = Atom.make("").pipe(Atom.keepAlive)
+export const inferenceAtom = Atom.make({
+  configPath: null,
+  config: null,
+  status: null,
+  models: [],
+  busy: false,
+  message: "Inference is not configured",
+  error: null,
+  testLog: [],
+} as InferenceUiState).pipe(Atom.keepAlive)
 
 export const selectedAccountAtom = Atom.make((get) => {
   const state = get(stateAtom)
@@ -165,12 +219,18 @@ const financialAccountTree = (
   accounts: Account[],
   unbalancedTransactionCount: number,
   collapsedAccountIds: ReadonlySet<string>,
+  accountView: AccountView,
 ) => [
   allTransactionsAccount,
   ...(unbalancedTransactionCount > 0
     ? [{ ...unbalancedTransactionsAccount, name: `Unbalanced (${unbalancedTransactionCount})` }]
     : []),
-  ...accountTree(accounts, collapsedAccountIds),
+  ...accountTree(
+    accounts.filter((account) => accountView === "income-expenses"
+      ? account.type === "income" || account.type === "expense"
+      : account.type === "asset" || account.type === "liability" || account.type === "equity"),
+    collapsedAccountIds,
+  ),
 ]
 
 export const accountTreeAtom = Atom.make((get) => accountTree(get(stateAtom).accounts))
@@ -180,6 +240,7 @@ export const financialAccountsAtom = Atom.make((get) =>
     get(stateAtom).accounts,
     get(stateAtom).unbalancedTransactionCount,
     get(collapsedAccountIdsAtom),
+    get(accountViewAtom),
   ),
 )
 
@@ -247,8 +308,21 @@ const request = <A>(path: string, init?: RequestInit) =>
 const TRANSACTION_PAGE_SIZE = 100
 const TRANSACTION_BUFFER_AHEAD = 150
 
-const accountPagePath = (accountId: string, cursor: AccountCursor | null) => {
+const accountTypesForView = (accountView: AccountView) => accountView === "income-expenses"
+  ? "income,expense"
+  : "asset,liability,equity"
+
+const accountPagePath = (
+  accountId: string,
+  cursor: AccountCursor | null,
+  accountView: AccountView,
+  search: string,
+) => {
   const query = new URLSearchParams({ limit: String(TRANSACTION_PAGE_SIZE) })
+  if (accountId === ALL_TRANSACTIONS_ID || accountId === UNBALANCED_TRANSACTIONS_ID) {
+    query.set("account_types", accountTypesForView(accountView))
+  }
+  if (search.trim()) query.set("search", search.trim())
   if (cursor) {
     query.set("before_date", cursor.date)
     query.set("before_source_id", cursor.source_id)
@@ -285,18 +359,25 @@ const load = (registry: Registry.Registry, preferredAccountId?: string | null, m
   Effect.gen(function* () {
     const startedAt = performance.now()
     const accounts = yield* request<Account[]>("/accounts")
-    const unbalanced = yield* request<{ count: number }>("/transactions/unbalanced/count")
+    const accountView = registry.get(accountViewAtom)
+    const search = registry.get(transactionSearchAtom)
+    const unbalancedQuery = new URLSearchParams({ account_types: accountTypesForView(accountView) })
+    if (search.trim()) unbalancedQuery.set("search", search.trim())
+    const unbalanced = yield* request<{ count: number }>(
+      `/transactions/unbalanced/count?${unbalancedQuery}`,
+    )
     const financialAccounts = financialAccountTree(
       accounts,
       unbalanced.count,
       registry.get(collapsedAccountIdsAtom),
+      accountView,
     )
     const selectedAccountId =
       financialAccounts.find((account) => account.id === preferredAccountId)?.id ??
       financialAccounts[0]?.id ??
       null
     const page = selectedAccountId
-      ? yield* request<AccountPage>(accountPagePath(selectedAccountId, null))
+      ? yield* request<AccountPage>(accountPagePath(selectedAccountId, null, accountView, search))
       : { transactions: [], next: null }
     const transactions = page.transactions
     registry.set(stateAtom, {
@@ -336,6 +417,174 @@ const execute = (registry: Registry.Registry, effect: Effect.Effect<void, Error>
   Effect.runFork(effect.pipe(Effect.catchAll((error) => Effect.sync(() => fail(registry, error)))))
 }
 
+const executeInference = (
+  registry: Registry.Registry,
+  effect: Effect.Effect<void, Error>,
+  onError?: (error: Error) => void,
+) => {
+  Effect.runFork(effect.pipe(Effect.catchAll((error) => Effect.sync(() => {
+    if (onError) {
+      onError(error)
+      return
+    }
+    registry.update(inferenceAtom, (state) => ({
+      ...state,
+      busy: false,
+      message: "Inference request failed",
+      error: error.message,
+    }))
+  }))))
+}
+
+const refreshInference = (registry: Registry.Registry, config: InferenceConfig) =>
+  Effect.gen(function* () {
+    const status = yield* request<InferenceStatus>("/inference/status")
+    const response = yield* request<{ models: InferenceModel[] }>("/inference/models")
+    registry.set(inferenceAtom, {
+      configPath: registry.get(inferenceAtom).configPath,
+      config,
+      status,
+      models: response.models,
+      busy: false,
+      message: status.ready ? "Inference is ready" : (status.reason ?? "Inference needs setup"),
+      error: null,
+      testLog: registry.get(inferenceAtom).testLog,
+    })
+  })
+
+export const loadInference = (registry: Registry.Registry) => {
+  registry.update(inferenceAtom, (state) => ({ ...state, busy: true, error: null, message: "Loading inference" }))
+  executeInference(
+    registry,
+    Effect.gen(function* () {
+      const response = yield* request<{ path: string; inference: InferenceConfig | null }>("/inference")
+      if (!response.inference) {
+        registry.set(inferenceAtom, {
+          configPath: response.path,
+          config: null,
+          status: null,
+          models: [],
+          busy: false,
+          message: `Configure inference in ${response.path}`,
+          error: null,
+          testLog: registry.get(inferenceAtom).testLog,
+        })
+        return
+      }
+      registry.update(inferenceAtom, (state) => ({ ...state, configPath: response.path }))
+      yield* refreshInference(registry, response.inference)
+    }),
+  )
+}
+
+export const testInference = (registry: Registry.Registry, prompt: string, model?: string) => {
+  const startedAt = performance.now()
+  const state = registry.get(inferenceAtom)
+  const requestedModel = model || state.config?.model || "default"
+  registry.update(inferenceAtom, (current) => ({
+    ...current,
+    busy: true,
+    error: null,
+    message: "Testing inference",
+    testLog: [
+      ...current.testLog,
+      ...(current.testLog.length > 0 ? [""] : []),
+      "Starting test generation",
+      `Plugin: ${current.status?.plugin?.name ?? "unknown"}`,
+      `Requested model: ${requestedModel}`,
+      "Sending inference/generate request",
+    ],
+  }))
+  executeInference(
+    registry,
+    Effect.gen(function* () {
+      const response = yield* request<{ text: string; model: string }>("/inference/generate", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ prompt, model: model || undefined }),
+      })
+      registry.update(inferenceAtom, (state) => ({
+        ...state,
+        busy: false,
+        message: "Inference test complete",
+        error: null,
+        testLog: [
+          ...state.testLog,
+          `Response received (${Math.round(performance.now() - startedAt)} ms)`,
+          `Resolved model: ${response.model}`,
+          "Test generation complete",
+          `Output: ${response.text}`,
+        ],
+      }))
+    }),
+    (error) => {
+      registry.update(inferenceAtom, (current) => ({
+        ...current,
+        busy: false,
+        message: "Inference request failed",
+        error: error.message,
+        testLog: [
+          ...current.testLog,
+          `Request failed (${Math.round(performance.now() - startedAt)} ms)`,
+          `Error: ${error.message}`,
+        ],
+      }))
+    },
+  )
+}
+
+export const saveInferenceModel = (registry: Registry.Registry, model: string) => {
+  registry.update(inferenceAtom, (state) => ({
+    ...state,
+    busy: true,
+    error: null,
+    message: "Saving inference model",
+  }))
+  executeInference(
+    registry,
+    Effect.gen(function* () {
+      const config = yield* request<InferenceConfig>("/inference/model", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model }),
+      })
+      registry.update(inferenceAtom, (state) => ({
+        ...state,
+        config,
+        busy: false,
+        message: "Inference model saved",
+        error: null,
+      }))
+    }),
+  )
+}
+
+export const restartInference = (registry: Registry.Registry) => {
+  registry.update(inferenceAtom, (state) => ({ ...state, busy: true, error: null, message: "Restarting inference" }))
+  executeInference(
+    registry,
+    Effect.gen(function* () {
+      yield* request<{ healthy: boolean }>("/inference/restart", { method: "POST" })
+      const response = yield* request<{ path: string; inference: InferenceConfig | null }>("/inference")
+      if (response.inference) {
+        registry.update(inferenceAtom, (state) => ({ ...state, configPath: response.path }))
+        yield* refreshInference(registry, response.inference)
+      } else {
+        registry.set(inferenceAtom, {
+          configPath: response.path,
+          config: null,
+          status: null,
+          models: [],
+          busy: false,
+          message: `Configure inference in ${response.path}`,
+          error: null,
+          testLog: registry.get(inferenceAtom).testLog,
+        })
+      }
+    }),
+  )
+}
+
 export const initialize = (registry: Registry.Registry) => {
   setBusy(registry, "Loading accounts")
   execute(registry, load(registry))
@@ -349,6 +598,8 @@ export const refresh = (registry: Registry.Registry) => {
 
 export const selectAccount = (registry: Registry.Registry, accountId: string) => {
   const startedAt = performance.now()
+  const accountView = registry.get(accountViewAtom)
+  const search = registry.get(transactionSearchAtom)
   const state = registry.get(stateAtom)
   if (state.busy) return
   if (state.selectedAccountId === accountId) {
@@ -375,7 +626,7 @@ export const selectAccount = (registry: Registry.Registry, accountId: string) =>
   }))
   execute(
     registry,
-    request<AccountPage>(accountPagePath(accountId, null)).pipe(
+    request<AccountPage>(accountPagePath(accountId, null, accountView, search)).pipe(
       Effect.tap((page) =>
         Effect.sync(() => {
           registry.update(stateAtom, (current) => ({
@@ -397,6 +648,28 @@ export const selectAccount = (registry: Registry.Registry, accountId: string) =>
       Effect.asVoid,
     ),
   )
+}
+
+export const setAccountView = (registry: Registry.Registry, accountView: AccountView) => {
+  if (registry.get(accountViewAtom) === accountView) return
+  const state = registry.get(stateAtom)
+  if (state.busy) return
+  registry.set(accountViewAtom, accountView)
+  const visibleAccounts = registry.get(financialAccountsAtom)
+  const selectedAccountId = visibleAccounts.some((account) => account.id === state.selectedAccountId)
+    ? state.selectedAccountId
+    : visibleAccounts[0]?.id ?? ALL_TRANSACTIONS_ID
+  setBusy(registry, "Switching account view")
+  execute(registry, load(registry, selectedAccountId))
+}
+
+export const setTransactionSearch = (registry: Registry.Registry, search: string) => {
+  if (registry.get(transactionSearchAtom) === search) return
+  const state = registry.get(stateAtom)
+  if (state.busy) return
+  registry.set(transactionSearchAtom, search)
+  setBusy(registry, search.trim() ? "Searching transactions" : "Loading transactions")
+  execute(registry, load(registry, state.selectedAccountId))
 }
 
 export const setAccountCollapsed = (
@@ -462,13 +735,15 @@ const cursorsEqual = (left: AccountCursor | null, right: AccountCursor | null) =
 const loadMoreTransactions = (registry: Registry.Registry) => {
   const state = registry.get(stateAtom)
   const accountId = state.selectedAccountId
+  const accountView = registry.get(accountViewAtom)
+  const search = registry.get(transactionSearchAtom)
   const cursor = state.nextCursor
   if (!accountId || !cursor || state.busy || state.loadingMore) return
   const startedAt = performance.now()
   registry.update(stateAtom, (current) => ({ ...current, loadingMore: true }))
   execute(
     registry,
-    request<AccountPage>(accountPagePath(accountId, cursor)).pipe(
+    request<AccountPage>(accountPagePath(accountId, cursor, accountView, search)).pipe(
       Effect.tap((page) =>
         Effect.sync(() => {
           registry.update(stateAtom, (current) => {
@@ -548,13 +823,20 @@ export const selectBufferedTransaction = (registry: Registry.Registry, targetInd
   ensureTransactionBuffer(registry)
 }
 
-const fetchTransactionBuffer = (accountId: string, minimumRows: number) =>
+const fetchTransactionBuffer = (
+  accountId: string,
+  minimumRows: number,
+  accountView: AccountView,
+  search: string,
+) =>
   Effect.gen(function* () {
     const transactions: AccountTransaction[] = []
     let cursor: AccountCursor | null = null
     let nextCursor: AccountCursor | null = null
     do {
-      const page: AccountPage = yield* request<AccountPage>(accountPagePath(accountId, cursor))
+      const page: AccountPage = yield* request<AccountPage>(
+        accountPagePath(accountId, cursor, accountView, search),
+      )
       transactions.push(...page.transactions)
       nextCursor = page.next
       cursor = page.next
@@ -626,16 +908,17 @@ export const choosePosting = (registry: Registry.Registry, postingId?: string) =
 export const beginAccountCreation = (registry: Registry.Registry) => {
   const state = registry.get(stateAtom)
   if (state.busy) return
+  const parent = state.accounts.find((account) => account.id === state.selectedAccountId) ?? null
   registry.update(stateAtom, (current) => ({
     ...current,
     creatingAccount: true,
     editingAccountId: null,
     assigning: false,
     newAccountName: "",
-    newAccountType: "asset" as const,
-    newAccountParentId: null,
+    newAccountType: parent?.type ?? "asset" as const,
+    newAccountParentId: parent?.id ?? null,
     selectedAssignmentIndex: 0,
-    message: "Choose a parent account",
+    message: parent ? `Create account under ${parent.name}` : "Choose a parent account",
   }))
 }
 
@@ -822,6 +1105,8 @@ export const assignToAccount = (registry: Registry.Registry, accountId?: string)
       const buffer = yield* fetchTransactionBuffer(
         state.selectedAccountId!,
         Math.max(state.transactions.length, TRANSACTION_PAGE_SIZE * 2),
+        registry.get(accountViewAtom),
+        registry.get(transactionSearchAtom),
       )
       const selectedIndex = buffer.transactions.findIndex(
         (candidate) => candidate.source_id === transaction.source_id,
@@ -874,6 +1159,8 @@ export const saveTransactionChanges = (
       const buffer = yield* fetchTransactionBuffer(
         state.selectedAccountId!,
         Math.max(state.transactions.length, TRANSACTION_PAGE_SIZE * 2),
+        registry.get(accountViewAtom),
+        registry.get(transactionSearchAtom),
       )
       const selectedIndex = buffer.transactions.findIndex(
         (transaction) => transaction.source_id === sourceId,

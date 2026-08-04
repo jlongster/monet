@@ -210,7 +210,10 @@ const server = Bun.serve({
       if (!account) {
         return json({ error: `Unknown account: ${accountId}` }, 404)
       }
-      const requestedStartDate = url.searchParams.get("start_date") || startDate
+      const initial = url.searchParams.get("initial") === "true"
+      const requestedStartDate = initial
+        ? startDate
+        : url.searchParams.get("start_date") || startDate
       const currentClient = await originClient()
       const result = await currentClient.fetchTransactions({
         accountIds: [accountId],
@@ -221,7 +224,7 @@ const server = Bun.serve({
       const pending = transactions.filter((transaction) => transaction.status === "pending")
       const posted = transactions.filter((transaction) => transaction.status !== "pending")
       const normalized = transactions.map(importedTransaction)
-      const opening = requestedStartDate === startDate
+      const opening = initial
         ? openingBalanceTransaction(account, normalized)
         : null
       return json({
