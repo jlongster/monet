@@ -48,6 +48,7 @@ export type ImportedAccount = {
 
 export type ImportedTransaction = {
   id: string
+  replaces_pending_id?: string
   date: string
   payee?: string | null
   amount: number

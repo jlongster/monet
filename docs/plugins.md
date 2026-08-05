@@ -71,9 +71,10 @@ field is omitted. Inference-only plugins omit `payeeFormat`.
 
 For `raw` imports, Monet builds one history-trained payee resolver per sync from the latest explicit
 user `set payee` change on each source. Newly inserted transactions are matched before their first
-projection rebuild. Accepted names are persisted as a distinct `payee_match` change, so automatic
-matches never become training examples. A later explicit user payee change always overrides an
-automatic match, regardless of change order. `clean` imports bypass this stage completely.
+projection rebuild. Accepted names are persisted as ordinary source-level `set payee` changes.
+The resolver is built once before processing the new sync batch, so current-batch results cannot
+train other transactions in that batch. Completed batch results become historical evidence for the
+next sync, and later user edits naturally replace them. `clean` imports bypass this stage completely.
 
 ## Inference methods
 
@@ -133,6 +134,7 @@ pending set for the account response; omitted previously pending transactions ar
 {
   "transactions": [{
     "id": "tx-1",
+    "replaces_pending_id": null,
     "date": "2026-07-20",
     "payee": "Coffee",
     "amount": -500,
@@ -145,6 +147,11 @@ pending set for the account response; omitted previously pending transactions ar
   "pending_ids": []
 }
 ```
+
+When a provider gives a posted transaction a new external ID, it may set `replaces_pending_id` to the
+old pending external ID. Monet then updates the pending source in place instead of creating a new
+source, preserving all payee edits, counterpart assignments, splits, notes, and other changes. Later
+responses may omit the field because Monet first resolves the current external transaction ID.
 
 ## Initial transfer review
 

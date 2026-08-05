@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS transactions_source (
 CREATE TABLE IF NOT EXISTS transactions_changes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     source_id TEXT NOT NULL REFERENCES transactions_source(id) ON DELETE CASCADE,
-    operation TEXT NOT NULL CHECK (operation IN ('set', 'payee_match', 'split', 'remove_split')),
+    operation TEXT NOT NULL CHECK (operation IN ('set', 'split', 'remove_split')),
     target_id TEXT NOT NULL,
     field TEXT,
     value_json TEXT,

@@ -300,6 +300,12 @@ impl Database {
         let pending_ids: HashSet<&str> = imported.pending_ids.iter().map(String::as_str).collect();
         for transaction in &imported.transactions {
             validate_external_id(&transaction.id)?;
+            if let Some(replaces_pending_id) = &transaction.replaces_pending_id {
+                validate_external_id(replaces_pending_id)?;
+                if transaction.pending || replaces_pending_id == &transaction.id {
+                    return Err(ModelError::InvalidExternalId.into());
+                }
+            }
             if transaction.date.is_empty() || !transaction_ids.insert(transaction.id.as_str()) {
                 return Err(ModelError::InvalidExternalId.into());
             }
@@ -312,11 +318,25 @@ impl Database {
         let mut new_source_ids = Vec::new();
         let mut matched_payees = 0;
         for transaction in &imported.transactions {
-            let source_id = imported_uuid(
-                &namespace,
-                "transaction",
-                &format!("{external_account_id}:{}", transaction.id),
-            );
+            let current_source_id =
+                existing_imported_source_id(&tx, external_account_id, &transaction.id, false)?;
+            let pending_source_id = if current_source_id.is_none() {
+                match transaction.replaces_pending_id.as_deref() {
+                    Some(pending_id) => {
+                        existing_imported_source_id(&tx, external_account_id, pending_id, true)?
+                    }
+                    None => None,
+                }
+            } else {
+                None
+            };
+            let source_id = current_source_id.or(pending_source_id).unwrap_or_else(|| {
+                imported_uuid(
+                    &namespace,
+                    "transaction",
+                    &format!("{external_account_id}:{}", transaction.id),
+                )
+            });
             let input = imported_source(account, transaction);
             let is_new = tx
                 .query_row(
@@ -340,7 +360,7 @@ impl Database {
                 tx.execute(
                     "INSERT INTO transactions_changes (
                         source_id, operation, target_id, field, value_json
-                     ) VALUES (?, 'payee_match', ?, NULL, ?)",
+                     ) VALUES (?, 'set', ?, 'payee', ?)",
                     params![
                         source_id,
                         source_id,
@@ -1157,6 +1177,31 @@ fn import_namespace() -> Uuid {
     Uuid::parse_str(IMPORT_SOURCE_ID).expect("import source namespace is valid")
 }
 
+fn existing_imported_source_id(
+    connection: &Connection,
+    external_account_id: &str,
+    external_transaction_id: &str,
+    pending_only: bool,
+) -> Result<Option<String>, DatabaseError> {
+    connection
+        .query_row(
+            "SELECT id FROM transactions_source
+             WHERE source = ?1
+               AND external_account_id = ?2
+               AND external_transaction_id = ?3
+               AND (?4 = 0 OR pending = 1)",
+            params![
+                IMPORT_SOURCE_ID,
+                external_account_id,
+                external_transaction_id,
+                pending_only
+            ],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
 fn imported_uuid(namespace: &Uuid, kind: &str, external_id: &str) -> String {
     Uuid::new_v5(namespace, format!("{kind}:{external_id}").as_bytes()).to_string()
 }
@@ -1430,12 +1475,6 @@ fn encode_change(change: &Change) -> Result<EncodedChange<'_>, DatabaseError> {
                 .then(|| serde_json::to_string(value))
                 .transpose()?,
         ),
-        Change::PayeeMatch { target_id, value } => (
-            "payee_match",
-            target_id,
-            None,
-            Some(serde_json::to_string(value)?),
-        ),
         Change::Split { target_id } => ("split", target_id, None, None),
         Change::RemoveSplit { target_id } => ("remove_split", target_id, None, None),
     })
@@ -1455,13 +1494,6 @@ fn decode_change(
                 .map(|value| serde_json::from_str(&value))
                 .transpose()?
                 .unwrap_or(Value::Null),
-        }),
-        "payee_match" => Ok(Change::PayeeMatch {
-            target_id,
-            value: value_json
-                .map(|value| serde_json::from_str(&value))
-                .transpose()?
-                .ok_or_else(|| ModelError::UnknownField("payee_match:value".into()))?,
         }),
         "split" => Ok(Change::Split { target_id }),
         "remove_split" => Ok(Change::RemoveSplit { target_id }),

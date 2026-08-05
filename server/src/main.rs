@@ -845,13 +845,6 @@ async fn append_changes(
     AxumPath(source_id): AxumPath<String>,
     Json(input): Json<ChangesInput>,
 ) -> Result<Json<SourceBundle>, ApiError> {
-    if input
-        .changes
-        .iter()
-        .any(|change| matches!(change, Change::PayeeMatch { .. }))
-    {
-        return Err(DatabaseError::Model(ModelError::AutomaticChange).into());
-    }
     let mut database = state.database.lock().map_err(|_| DatabaseError::Poisoned)?;
     Ok(Json(database.append_changes(&source_id, input.changes)?))
 }
@@ -1802,5 +1795,185 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(body["changes"].as_array().unwrap().is_empty());
         assert_eq!(body["postings"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn posted_transaction_can_replace_pending_source_identity() {
+        use crate::model::{ImportedAccount, ImportedTransaction, ImportedTransactions};
+
+        let mut database = Database::open(":memory:").unwrap();
+        let account = database
+            .sync_accounts(&[ImportedAccount {
+                id: "bank".into(),
+                parent_id: None,
+                name: "Checking".into(),
+                account_type: AccountType::Asset,
+            }])
+            .unwrap()
+            .remove(0)
+            .0;
+        let pending = ImportedTransaction {
+            id: "pending-1".into(),
+            replaces_pending_id: None,
+            date: "2026-08-04".into(),
+            payee: Some("COFFEE SHOP PENDING".into()),
+            amount: -500,
+            category: None,
+            pending: true,
+            opening_balance: false,
+            notes: None,
+            raw: Value::Null,
+        };
+        let (_, _, pending_ids, _) = database
+            .sync_transactions(
+                &account,
+                ImportedTransactions {
+                    transactions: vec![pending],
+                    pending_ids: vec!["pending-1".into()],
+                },
+                None,
+            )
+            .unwrap();
+        let source_id = pending_ids[0].clone();
+        database
+            .append_changes(
+                &source_id,
+                vec![Change::Set {
+                    target_id: source_id.clone(),
+                    field: "payee".into(),
+                    value: json!("Coffee Shop"),
+                }],
+            )
+            .unwrap();
+
+        let posted = ImportedTransaction {
+            id: "posted-1".into(),
+            replaces_pending_id: Some("pending-1".into()),
+            date: "2026-08-05".into(),
+            payee: Some("COFFEE SHOP".into()),
+            amount: -500,
+            category: None,
+            pending: false,
+            opening_balance: false,
+            notes: None,
+            raw: Value::Null,
+        };
+        let (_, deleted_pending, new_ids, _) = database
+            .sync_transactions(
+                &account,
+                ImportedTransactions {
+                    transactions: vec![posted],
+                    pending_ids: vec![],
+                },
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(deleted_pending, 0);
+        assert!(new_ids.is_empty());
+        let bundle = database.get_source(&source_id).unwrap();
+        assert_eq!(bundle.source.external_transaction_id, "posted-1");
+        assert!(!bundle.source.transaction.pending);
+        assert_eq!(bundle.changes.len(), 1);
+        assert_eq!(
+            bundle.projection.postings[0].posting.payee.as_deref(),
+            Some("Coffee Shop")
+        );
+    }
+
+    #[test]
+    fn automatic_payee_sets_train_the_next_batch_and_can_be_bypassed() {
+        use crate::model::{ImportedAccount, ImportedTransaction, ImportedTransactions};
+        use monet_server::payee_resolution::PayeeResolver;
+
+        let imported = |id: &str, payee: &str| ImportedTransaction {
+            id: id.into(),
+            replaces_pending_id: None,
+            date: "2026-08-05".into(),
+            payee: Some(payee.into()),
+            amount: -500,
+            category: None,
+            pending: false,
+            opening_balance: false,
+            notes: None,
+            raw: Value::Null,
+        };
+        let mut database = Database::open(":memory:").unwrap();
+        let account = database
+            .sync_accounts(&[ImportedAccount {
+                id: "bank".into(),
+                parent_id: None,
+                name: "Checking".into(),
+                account_type: AccountType::Asset,
+            }])
+            .unwrap()
+            .remove(0)
+            .0;
+
+        let (_, _, first_ids, first_matches) = database
+            .sync_transactions(
+                &account,
+                ImportedTransactions {
+                    transactions: vec![imported("tx-1", "POS PURCHASE STARBUCKS #1000")],
+                    pending_ids: vec![],
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(first_matches, 0);
+        database
+            .append_changes(
+                &first_ids[0],
+                vec![Change::Set {
+                    target_id: first_ids[0].clone(),
+                    field: "payee".into(),
+                    value: json!("Starbucks"),
+                }],
+            )
+            .unwrap();
+
+        let resolver = PayeeResolver::new(&database.payee_examples().unwrap());
+        let (_, _, second_ids, second_matches) = database
+            .sync_transactions(
+                &account,
+                ImportedTransactions {
+                    transactions: vec![imported("tx-2", "POS PURCHASE STARBUCKS #2000")],
+                    pending_ids: vec![],
+                },
+                Some(&resolver),
+            )
+            .unwrap();
+        assert_eq!(second_matches, 1);
+        let second = database.get_source(&second_ids[0]).unwrap();
+        assert_eq!(
+            second.source.transaction.payee.as_deref(),
+            Some("POS PURCHASE STARBUCKS #2000")
+        );
+        assert_eq!(
+            second.projection.postings[0].posting.payee.as_deref(),
+            Some("Starbucks")
+        );
+        assert!(matches!(
+            &second.changes[0].change,
+            Change::Set { field, value, .. } if field == "payee" && value == "Starbucks"
+        ));
+        assert_eq!(database.payee_examples().unwrap().len(), 2);
+
+        let (_, _, third_ids, third_matches) = database
+            .sync_transactions(
+                &account,
+                ImportedTransactions {
+                    transactions: vec![imported("tx-3", "POS PURCHASE STARBUCKS #3000")],
+                    pending_ids: vec![],
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(third_matches, 0);
+        let third = database.get_source(&third_ids[0]).unwrap();
+        assert_eq!(
+            third.projection.postings[0].posting.payee.as_deref(),
+            Some("POS PURCHASE STARBUCKS #3000")
+        );
     }
 }
