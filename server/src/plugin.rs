@@ -12,7 +12,7 @@ use tokio::{
 
 use crate::model::{
     ImportPluginConfig, ImportTransactionsInput, ImportedAccounts, ImportedTransactions,
-    InferenceConfig, InferenceGenerateInput, InferenceGenerateOutput, InferenceModels,
+    InferenceConfig, InferenceGenerateInput, InferenceGenerateOutput, InferenceModels, PayeeFormat,
     PluginCapabilities, PluginConfig, PluginInfo, PluginStatus,
 };
 
@@ -149,6 +149,7 @@ impl PluginProcess {
                     transaction_import: false,
                     structured_output: false,
                     cancellation: false,
+                    payee_format: None,
                 },
             },
             next_id: 1,
@@ -405,7 +406,7 @@ impl ImportManager {
     pub async fn accounts(
         &self,
         config: ImportPluginConfig,
-    ) -> Result<ImportedAccounts, PluginError> {
+    ) -> Result<(ImportedAccounts, PayeeFormat), PluginError> {
         let timeout_ms = config.plugin.request_timeout_ms;
         self.plugin
             .with_process(
@@ -416,7 +417,15 @@ impl ImportManager {
                 timeout_ms,
             )
             .await
-            .map(|(accounts, _)| accounts)
+            .map(|(accounts, initialize)| {
+                (
+                    accounts,
+                    initialize
+                        .capabilities
+                        .payee_format
+                        .unwrap_or(PayeeFormat::Raw),
+                )
+            })
     }
 
     pub async fn transactions(

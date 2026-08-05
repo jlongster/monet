@@ -59,6 +59,9 @@ runs the configured transaction import. When new accounts are registered, Monet 
 plugin to reject false positives from a system-wide transfer-candidate pass involving those new
 accounts. See [Monet plugins](docs/plugins.md) for the protocol and JavaScript SDK.
 
+Raw-payee import plugins use Monet's history-trained Rust payee resolver for newly inserted
+transactions. Clean-payee plugins bypass resolution through the negotiated `payeeFormat` capability.
+
 ## Terminal Control
 
 Run Monet in a shared Terminal Control workspace to use it in a real terminal while agents can

@@ -9,6 +9,8 @@ use serde_json::Value;
 use thiserror::Error;
 use uuid::Uuid;
 
+use monet_server::payee_resolution::{PayeeExample, PayeeQuery, PayeeResolver};
+
 use crate::model::{
     AccountCursor, AccountDeletion, AccountInput, AccountRecord, AccountTransaction,
     AccountTransactionsPage, AccountType, Change, ImportedAccount, ImportedTransaction,
@@ -287,7 +289,8 @@ impl Database {
         &mut self,
         account: &AccountRecord,
         imported: ImportedTransactions,
-    ) -> Result<(usize, usize, Vec<String>), DatabaseError> {
+        payee_resolver: Option<&PayeeResolver>,
+    ) -> Result<(usize, usize, Vec<String>, usize), DatabaseError> {
         let external_account_id = account
             .external_id
             .as_deref()
@@ -307,6 +310,7 @@ impl Database {
 
         let tx = self.connection.transaction()?;
         let mut new_source_ids = Vec::new();
+        let mut matched_payees = 0;
         for transaction in &imported.transactions {
             let source_id = imported_uuid(
                 &namespace,
@@ -323,6 +327,28 @@ impl Database {
                 .optional()?
                 .is_none();
             upsert_source(&tx, &source_id, &input)?;
+            if is_new
+                && let (Some(resolver), Some(imported_payee)) =
+                    (payee_resolver, transaction.payee.as_ref())
+                && let Some(resolved_payee) = resolver
+                    .resolve(&PayeeQuery {
+                        imported_payee: imported_payee.clone(),
+                    })
+                    .resolved_payee
+                && resolved_payee != *imported_payee
+            {
+                tx.execute(
+                    "INSERT INTO transactions_changes (
+                        source_id, operation, target_id, field, value_json
+                     ) VALUES (?, 'payee_match', ?, NULL, ?)",
+                    params![
+                        source_id,
+                        source_id,
+                        serde_json::to_string(&resolved_payee)?
+                    ],
+                )?;
+                matched_payees += 1;
+            }
             rebuild_projection(&tx, &source_id)?;
             if is_new {
                 new_source_ids.push(source_id);
@@ -348,7 +374,12 @@ impl Database {
             }
         }
         tx.commit()?;
-        Ok((imported.transactions.len(), deleted_pending, new_source_ids))
+        Ok((
+            imported.transactions.len(),
+            deleted_pending,
+            new_source_ids,
+            matched_payees,
+        ))
     }
 
     pub fn account_sync_start_date(&self, account_id: &str) -> Result<String, DatabaseError> {
@@ -503,6 +534,50 @@ impl Database {
                 unallocated_amount: expected.unallocated_amount,
             },
         })
+    }
+
+    pub fn payee_examples(&self) -> Result<Vec<PayeeExample>, DatabaseError> {
+        let mut statement = self.connection.prepare(
+            "SELECT source.payee, changes.value_json
+             FROM transactions_changes AS changes
+             JOIN transactions_source AS source ON source.id = changes.source_id
+             WHERE changes.operation = 'set'
+               AND changes.target_id = changes.source_id
+               AND changes.field = 'payee'
+               AND changes.id = (
+                   SELECT MAX(latest.id)
+                   FROM transactions_changes AS latest
+                   WHERE latest.source_id = changes.source_id
+                     AND latest.operation = 'set'
+                     AND latest.target_id = latest.source_id
+                     AND latest.field = 'payee'
+               )
+             ORDER BY changes.id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+            ))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter_map(|(imported_payee, value_json)| {
+                let imported_payee = imported_payee?;
+                let value_json = value_json?;
+                Some(
+                    serde_json::from_str::<Option<String>>(&value_json)
+                        .map_err(DatabaseError::from)
+                        .map(|resolved_payee| {
+                            resolved_payee.map(|resolved_payee| PayeeExample {
+                                imported_payee,
+                                resolved_payee,
+                            })
+                        }),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(|examples| examples.into_iter().flatten().collect())
     }
 
     pub fn transfer_pairs_for_accounts(
@@ -1355,6 +1430,12 @@ fn encode_change(change: &Change) -> Result<EncodedChange<'_>, DatabaseError> {
                 .then(|| serde_json::to_string(value))
                 .transpose()?,
         ),
+        Change::PayeeMatch { target_id, value } => (
+            "payee_match",
+            target_id,
+            None,
+            Some(serde_json::to_string(value)?),
+        ),
         Change::Split { target_id } => ("split", target_id, None, None),
         Change::RemoveSplit { target_id } => ("remove_split", target_id, None, None),
     })
@@ -1374,6 +1455,13 @@ fn decode_change(
                 .map(|value| serde_json::from_str(&value))
                 .transpose()?
                 .unwrap_or(Value::Null),
+        }),
+        "payee_match" => Ok(Change::PayeeMatch {
+            target_id,
+            value: value_json
+                .map(|value| serde_json::from_str(&value))
+                .transpose()?
+                .ok_or_else(|| ModelError::UnknownField("payee_match:value".into()))?,
         }),
         "split" => Ok(Change::Split { target_id }),
         "remove_split" => Ok(Change::RemoveSplit { target_id }),

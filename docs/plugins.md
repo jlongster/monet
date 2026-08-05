@@ -59,11 +59,21 @@ The first request is `initialize`:
 The plugin selects protocol version 1 and reports its identity and capabilities:
 
 ```json
-{"jsonrpc":"2.0","id":"1","result":{"protocolVersion":1,"plugin":{"name":"Example","version":"1.0.0"},"capabilities":{"inference":false,"transactionImport":true,"structuredOutput":false,"cancellation":false}}}
+{"jsonrpc":"2.0","id":"1","result":{"protocolVersion":1,"plugin":{"name":"Example","version":"1.0.0"},"capabilities":{"inference":false,"transactionImport":true,"structuredOutput":false,"cancellation":false,"payeeFormat":"raw"}}}
 ```
 
 Monet sends `shutdown` before stopping a healthy process and forcibly terminates it if it does not
 exit promptly.
+
+Transaction import plugins may advertise `payeeFormat: "clean"` when their `payee` values are already
+display-ready and should bypass Monet payee resolution. SDK import plugins default to `raw` when the
+field is omitted. Inference-only plugins omit `payeeFormat`.
+
+For `raw` imports, Monet builds one history-trained payee resolver per sync from the latest explicit
+user `set payee` change on each source. Newly inserted transactions are matched before their first
+projection rebuild. Accepted names are persisted as a distinct `payee_match` change, so automatic
+matches never become training examples. A later explicit user payee change always overrides an
+automatic match, regardless of change order. `clean` imports bypass this stage completely.
 
 ## Inference methods
 

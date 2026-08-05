@@ -130,6 +130,15 @@ pub struct PluginCapabilities {
     pub structured_output: bool,
     #[serde(default)]
     pub cancellation: bool,
+    #[serde(default)]
+    pub payee_format: Option<PayeeFormat>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PayeeFormat {
+    Clean,
+    Raw,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -236,6 +245,7 @@ pub struct ImportSummary {
     pub transactions: usize,
     pub deleted_pending: usize,
     pub categorized: usize,
+    pub payees_resolved: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -283,6 +293,10 @@ pub enum Change {
         target_id: String,
         field: String,
         value: Value,
+    },
+    PayeeMatch {
+        target_id: String,
+        value: String,
     },
     Split {
         target_id: String,
@@ -387,6 +401,8 @@ pub enum ModelError {
     InvalidAccountType(String),
     #[error("account name must not be empty")]
     InvalidAccountName,
+    #[error("automatic changes cannot be submitted by clients")]
+    AutomaticChange,
     #[error("account hierarchy contains a cycle involving '{0}'")]
     AccountCycle(String),
     #[error("parent and child accounts must have the same type")]
@@ -470,6 +486,7 @@ pub fn reduce(
     };
     let mut splits: Vec<Split> = Vec::new();
     let mut used_split_ids = HashSet::new();
+    let mut payee_explicitly_set = false;
 
     for stored in changes {
         match &stored.change {
@@ -477,7 +494,12 @@ pub fn reduce(
                 target_id,
                 field,
                 value,
-            } if target_id == source_id => set_base(&mut base, field, value)?,
+            } if target_id == source_id => {
+                set_base(&mut base, field, value)?;
+                if field == "payee" {
+                    payee_explicitly_set = true;
+                }
+            }
             Change::Set {
                 target_id,
                 field,
@@ -488,6 +510,15 @@ pub fn reduce(
                     .find(|split| split.id == *target_id)
                     .ok_or_else(|| ModelError::UnknownSplit(target_id.clone()))?;
                 set_split(split, field, value)?;
+            }
+            Change::PayeeMatch { target_id, value }
+                if target_id == source_id && !payee_explicitly_set =>
+            {
+                base.payee = Some(value.clone());
+            }
+            Change::PayeeMatch { target_id, .. } if target_id == source_id => {}
+            Change::PayeeMatch { target_id, .. } => {
+                return Err(ModelError::UnknownSplit(target_id.clone()));
             }
             Change::Split { target_id } => {
                 validate_uuid(target_id)?;
@@ -715,6 +746,77 @@ mod tests {
                 .postings
                 .iter()
                 .all(|posting| posting.posting.payee.as_deref() == Some("Target"))
+        );
+    }
+
+    #[test]
+    fn explicit_payee_changes_override_automatic_matches() {
+        let matched = reduce(
+            SOURCE_ID,
+            &source(-10_000),
+            &[stored(
+                1,
+                Change::PayeeMatch {
+                    target_id: SOURCE_ID.into(),
+                    value: "Target".into(),
+                },
+            )],
+        )
+        .unwrap();
+        assert_eq!(matched.postings[0].posting.payee.as_deref(), Some("Target"));
+
+        let explicit_after = reduce(
+            SOURCE_ID,
+            &source(-10_000),
+            &[
+                stored(
+                    1,
+                    Change::PayeeMatch {
+                        target_id: SOURCE_ID.into(),
+                        value: "Target".into(),
+                    },
+                ),
+                stored(
+                    2,
+                    Change::Set {
+                        target_id: SOURCE_ID.into(),
+                        field: "payee".into(),
+                        value: json!("My Target"),
+                    },
+                ),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            explicit_after.postings[0].posting.payee.as_deref(),
+            Some("My Target")
+        );
+
+        let automatic_after = reduce(
+            SOURCE_ID,
+            &source(-10_000),
+            &[
+                stored(
+                    1,
+                    Change::Set {
+                        target_id: SOURCE_ID.into(),
+                        field: "payee".into(),
+                        value: json!("My Target"),
+                    },
+                ),
+                stored(
+                    2,
+                    Change::PayeeMatch {
+                        target_id: SOURCE_ID.into(),
+                        value: "Target".into(),
+                    },
+                ),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            automatic_after.postings[0].posting.payee.as_deref(),
+            Some("My Target")
         );
     }
 

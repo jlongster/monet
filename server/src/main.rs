@@ -32,11 +32,12 @@ use crate::{
         AccountCursor, AccountDeletion, AccountInput, AccountRecord, AccountTransactionsPage,
         AccountType, Change, ChangesInput, ImportPluginConfig, ImportSummary,
         ImportTransactionsInput, InferenceConfig, InferenceGenerateInput, InferenceGenerateOutput,
-        InferenceModelInput, InferenceModels, ModelError, PluginStatus, PluginsConfigFile,
-        SourceBundle, SourceInput,
+        InferenceModelInput, InferenceModels, ModelError, PayeeFormat, PluginStatus,
+        PluginsConfigFile, SourceBundle, SourceInput,
     },
     plugin::{ImportManager, InferenceManager, PluginError},
 };
+use monet_server::payee_resolution::PayeeResolver;
 
 #[derive(Clone)]
 struct AppState {
@@ -325,8 +326,12 @@ async fn run_import(State(state): State<AppState>) -> Result<Json<ImportSummary>
     let result = run_import_inner(&state).await;
     let completion = match &result {
         Ok(summary) => format!(
-            "Sync complete: {} accounts, {} transactions, {} categorized, {} pending removed",
-            summary.accounts, summary.transactions, summary.categorized, summary.deleted_pending
+            "Sync complete: {} accounts, {} transactions, {} payees resolved, {} categorized, {} pending removed",
+            summary.accounts,
+            summary.transactions,
+            summary.payees_resolved,
+            summary.categorized,
+            summary.deleted_pending
         ),
         Err(error) => format!("Sync failed: {error:?}"),
     };
@@ -360,7 +365,7 @@ async fn run_import_inner(state: &AppState) -> Result<ImportSummary, ApiError> {
     log_import(state, "Loading transaction import plugin configuration");
     let config = require_import_config(&state)?;
     log_import(state, "Requesting account snapshot from import plugin");
-    let imported_accounts = state.importer.accounts(config.clone()).await?;
+    let (imported_accounts, payee_format) = state.importer.accounts(config.clone()).await?;
     log_import(
         state,
         format!(
@@ -371,6 +376,26 @@ async fn run_import_inner(state: &AppState) -> Result<ImportSummary, ApiError> {
     let accounts = {
         let mut database = state.database.lock().map_err(|_| DatabaseError::Poisoned)?;
         database.sync_accounts(&imported_accounts.accounts)?
+    };
+    let payee_resolver = if payee_format == PayeeFormat::Raw {
+        let examples = {
+            let database = state.database.lock().map_err(|_| DatabaseError::Poisoned)?;
+            database.payee_examples()?
+        };
+        log_import(
+            state,
+            format!(
+                "Raw payees: loaded {} confirmed payee examples",
+                examples.len()
+            ),
+        );
+        Some(PayeeResolver::new(&examples))
+    } else {
+        log_import(
+            state,
+            "Importer provides clean payees; skipping payee resolution",
+        );
+        None
     };
     let new_account_ids = accounts
         .iter()
@@ -391,6 +416,7 @@ async fn run_import_inner(state: &AppState) -> Result<ImportSummary, ApiError> {
         transactions: 0,
         deleted_pending: 0,
         categorized: 0,
+        payees_resolved: 0,
     };
     let mut new_source_ids = Vec::new();
     for (account, initial) in accounts {
@@ -430,18 +456,20 @@ async fn run_import_inner(state: &AppState) -> Result<ImportSummary, ApiError> {
             )
             .await?;
         let returned = imported.transactions.len();
-        let (transactions, deleted_pending, account_new_source_ids) = {
+        let (transactions, deleted_pending, account_new_source_ids, matched_payees) = {
             let mut database = state.database.lock().map_err(|_| DatabaseError::Poisoned)?;
-            database.sync_transactions(&account, imported)?
+            database.sync_transactions(&account, imported, payee_resolver.as_ref())?
         };
         summary.transactions += transactions;
         summary.deleted_pending += deleted_pending;
+        summary.payees_resolved += matched_payees;
         log_import(
             state,
             format!(
-                "{}: received {returned}, inserted {}, removed {} pending",
+                "{}: received {returned}, inserted {}, resolved {} payees, removed {} pending",
                 account.name,
                 account_new_source_ids.len(),
+                matched_payees,
                 deleted_pending
             ),
         );
@@ -817,6 +845,13 @@ async fn append_changes(
     AxumPath(source_id): AxumPath<String>,
     Json(input): Json<ChangesInput>,
 ) -> Result<Json<SourceBundle>, ApiError> {
+    if input
+        .changes
+        .iter()
+        .any(|change| matches!(change, Change::PayeeMatch { .. }))
+    {
+        return Err(DatabaseError::Model(ModelError::AutomaticChange).into());
+    }
     let mut database = state.database.lock().map_err(|_| DatabaseError::Poisoned)?;
     Ok(Json(database.append_changes(&source_id, input.changes)?))
 }

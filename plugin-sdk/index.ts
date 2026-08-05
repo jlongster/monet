@@ -67,6 +67,7 @@ export type ImportTransactionsRequest = {
 export type ImportPlugin = {
   name: string
   version: string
+  payeeFormat?: "clean" | "raw"
   status(config: unknown): Promise<PluginStatus>
   accounts(config: unknown): Promise<{ accounts: ImportedAccount[] }>
   transactions(
@@ -132,6 +133,9 @@ export const servePlugin = async (plugin: MonetPlugin) => {
             transactionImport,
             structuredOutput: inference && plugin.structuredOutput === true,
             cancellation: false,
+            ...(transactionImport && "accounts" in plugin
+              ? { payeeFormat: plugin.payeeFormat ?? "raw" }
+              : {}),
           },
         })
       } else if (!initialized) {

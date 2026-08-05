@@ -43,6 +43,7 @@ export type PluginStatus = {
     transactionImport: boolean
     structuredOutput: boolean
     cancellation: boolean
+    payeeFormat?: "clean" | "raw" | null
   } | null
 }
 
@@ -1294,12 +1295,13 @@ export const sync = (registry: Registry.Registry) => {
         transactions: number
         deleted_pending: number
         categorized: number
+        payees_resolved: number
       }>("/import/run", { method: "POST" })
       yield* refreshLog
       yield* load(
         registry,
         selected,
-        `Synced ${summary.accounts} accounts / ${summary.transactions} transactions / categorized ${summary.categorized}`,
+        `Synced ${summary.accounts} accounts / ${summary.transactions} transactions / resolved ${summary.payees_resolved} payees / categorized ${summary.categorized}`,
       )
     }).pipe(
       Effect.ensuring(Fiber.interrupt(polling).pipe(Effect.zipRight(refreshLog))),

@@ -63,6 +63,7 @@ const generateTransactions = () => {
 const plugin = definePlugin({
   name: "Demo transaction import",
   version: "1.0.0",
+  payeeFormat: "clean",
 
   async status() {
     return { ready: true, detail: "Generating demo transactions" }
