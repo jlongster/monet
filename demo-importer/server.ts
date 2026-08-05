@@ -60,53 +60,35 @@ const generateTransactions = () => {
   }
 }
 
-const json = (value: unknown, status = 200) =>
-  Response.json(value, {
-    status,
-    headers: { "cache-control": "no-store" },
-  })
+const plugin = definePlugin({
+  name: "Demo transaction import",
+  version: "1.0.0",
 
-const server = Bun.serve({
-  port: Number(process.env.DEMO_IMPORTER_PORT ?? 47833),
-  fetch(request) {
-    const url = new URL(request.url)
-    console.log(`${request.method} ${url.pathname}${url.search}`)
+  async status() {
+    return { ready: true, detail: "Generating demo transactions" }
+  },
 
-    if (request.method !== "GET") {
-      return json({ error: "Method not allowed" }, 405)
-    }
+  async accounts() {
+    return { accounts }
+  },
 
-    if (url.pathname === "/accounts") {
-      return json({ accounts })
-    }
-
-    const match = url.pathname.match(/^\/accounts\/([^/]+)\/transactions$/)
-    if (!match) {
-      return json({ error: "Not found" }, 404)
-    }
-
-    const accountId = decodeURIComponent(match[1])
+  async transactions(request: ImportTransactionsRequest) {
+    const accountId = request.accountId
     if (!accounts.some((account) => account.id === accountId)) {
-      return json({ error: `Unknown account: ${accountId}` }, 404)
+      throw new Error(`Unknown account: ${accountId}`)
     }
 
     if (accountId !== "checking") {
-      return json({ transactions: [], pending_ids: [], latest: null })
+      return { transactions: [], pending_ids: [] }
     }
 
     generateTransactions()
-    const after = url.searchParams.get("after")
-    const afterIndex = after ? generated.findIndex((transaction) => transaction.id === after) : -1
-    const newTransactions = after
-      ? generated.slice(afterIndex < 0 ? 0 : afterIndex + 1)
-      : generated
-
-    return json({
-      transactions: newTransactions,
+    return {
+      transactions: generated,
       pending_ids: [],
-      latest: generated.at(-1)?.id ?? null,
-    })
+    }
   },
 })
 
-console.log(`demo importer listening on ${server.url}`)
+await servePlugin(plugin)
+import { definePlugin, servePlugin, type ImportTransactionsRequest } from "../plugin-sdk/index"

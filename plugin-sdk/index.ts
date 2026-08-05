@@ -1,6 +1,6 @@
 import { createInterface } from "node:readline"
 
-export type InferenceStatus = {
+export type PluginStatus = {
   ready: boolean
   detail?: string
   reason?: string
@@ -32,15 +32,58 @@ export type GenerateResponse = {
 export type InferencePlugin = {
   name: string
   version: string
-  status(config: unknown): Promise<InferenceStatus>
+  status(config: unknown): Promise<PluginStatus>
   models(config: unknown): Promise<{ models: InferenceModel[] }>
   generate(request: GenerateRequest, config: unknown): Promise<GenerateResponse>
+  structuredOutput?: boolean
   shutdown?(): Promise<void>
 }
 
-export const defineInferencePlugin = <Plugin extends InferencePlugin>(plugin: Plugin) => plugin
+export type ImportedAccount = {
+  id: string
+  parent_id: string | null
+  name: string
+  type: "asset" | "liability" | "income" | "expense" | "equity"
+}
 
-export const serveInferencePlugin = async (plugin: InferencePlugin) => {
+export type ImportedTransaction = {
+  id: string
+  date: string
+  payee?: string | null
+  amount: number
+  category?: string | null
+  pending?: boolean
+  opening_balance?: boolean
+  notes?: string | null
+  raw?: unknown
+}
+
+export type ImportTransactionsRequest = {
+  accountId: string
+  initial: boolean
+  startDate?: string
+}
+
+export type ImportPlugin = {
+  name: string
+  version: string
+  status(config: unknown): Promise<PluginStatus>
+  accounts(config: unknown): Promise<{ accounts: ImportedAccount[] }>
+  transactions(
+    request: ImportTransactionsRequest,
+    config: unknown,
+  ): Promise<{
+    transactions: ImportedTransaction[]
+    pending_ids?: string[]
+  }>
+  shutdown?(): Promise<void>
+}
+
+export type MonetPlugin = InferencePlugin | ImportPlugin
+
+export const definePlugin = <Plugin extends MonetPlugin>(plugin: Plugin) => plugin
+
+export const servePlugin = async (plugin: MonetPlugin) => {
   const stderr = (...values: unknown[]) => {
     process.stderr.write(`${values.map(String).join(" ")}\n`)
   }
@@ -79,23 +122,32 @@ export const serveInferencePlugin = async (plugin: InferencePlugin) => {
         }
         config = message.params.config ?? null
         initialized = true
+        const inference = "models" in plugin && "generate" in plugin
+        const transactionImport = "accounts" in plugin && "transactions" in plugin
         result(id, {
           protocolVersion: 1,
           plugin: { name: plugin.name, version: plugin.version },
           capabilities: {
-            inference: true,
-            structuredOutput: false,
+            inference,
+            transactionImport,
+            structuredOutput: inference && plugin.structuredOutput === true,
             cancellation: false,
           },
         })
       } else if (!initialized) {
         error(id, -32002, "Plugin is not initialized")
-      } else if (message.method === "inference/status") {
+      } else if (message.method === "inference/status" && "generate" in plugin) {
         result(id, await plugin.status(config))
-      } else if (message.method === "inference/models") {
+      } else if (message.method === "inference/models" && "models" in plugin) {
         result(id, await plugin.models(config))
-      } else if (message.method === "inference/generate") {
+      } else if (message.method === "inference/generate" && "generate" in plugin) {
         result(id, await plugin.generate(message.params, config))
+      } else if (message.method === "import/status" && "accounts" in plugin) {
+        result(id, await plugin.status(config))
+      } else if (message.method === "import/accounts" && "accounts" in plugin) {
+        result(id, await plugin.accounts(config))
+      } else if (message.method === "import/transactions" && "transactions" in plugin) {
+        result(id, await plugin.transactions(message.params, config))
       } else if (message.method === "shutdown") {
         await plugin.shutdown?.()
         result(id, null)

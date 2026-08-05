@@ -55,25 +55,13 @@ pub struct AccountRecord {
     pub imported_name: Option<String>,
     #[serde(rename = "type")]
     pub account_type: AccountType,
-    pub latest_external_transaction_id: Option<String>,
     pub balance: i64,
     pub has_children: bool,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-pub struct ImportConfigInput {
-    pub url: String,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct ImportConfig {
-    pub id: String,
-    pub url: String,
-}
-
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct InferenceConfig {
+pub struct PluginConfig {
     pub command: Vec<String>,
     #[serde(default)]
     pub cwd: Option<String>,
@@ -81,25 +69,40 @@ pub struct InferenceConfig {
     pub env: Vec<String>,
     #[serde(default)]
     pub config: Value,
-    #[serde(default)]
-    pub model: Option<String>,
     #[serde(default = "default_initialize_timeout_ms")]
     pub initialize_timeout_ms: u64,
     #[serde(default = "default_request_timeout_ms")]
     pub request_timeout_ms: u64,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct InferenceConfig {
+    #[serde(flatten)]
+    pub plugin: PluginConfig,
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ImportPluginConfig {
+    #[serde(flatten)]
+    pub plugin: PluginConfig,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub struct MonetConfig {
     #[serde(default)]
     pub inference: Option<InferenceConfig>,
+    #[serde(default)]
+    pub import: Option<ImportPluginConfig>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct InferenceConfigFile {
+pub struct PluginsConfigFile {
     pub path: String,
     pub inference: Option<InferenceConfig>,
+    pub import: Option<ImportPluginConfig>,
 }
 
 fn default_initialize_timeout_ms() -> u64 {
@@ -112,15 +115,17 @@ fn default_request_timeout_ms() -> u64 {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct InferencePluginInfo {
+pub struct PluginInfo {
     pub name: String,
     pub version: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct InferenceCapabilities {
+pub struct PluginCapabilities {
     pub inference: bool,
+    #[serde(default)]
+    pub transaction_import: bool,
     #[serde(default)]
     pub structured_output: bool,
     #[serde(default)]
@@ -129,14 +134,14 @@ pub struct InferenceCapabilities {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct InferenceStatus {
+pub struct PluginStatus {
     pub ready: bool,
     pub detail: Option<String>,
     pub reason: Option<String>,
     #[serde(default)]
     pub setup: Value,
-    pub plugin: Option<InferencePluginInfo>,
-    pub capabilities: Option<InferenceCapabilities>,
+    pub plugin: Option<PluginInfo>,
+    pub capabilities: Option<PluginCapabilities>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -180,6 +185,14 @@ pub struct InferenceGenerateOutput {
     pub usage: Value,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportTransactionsInput {
+    pub account_id: String,
+    pub initial: bool,
+    pub start_date: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ImportedAccount {
     pub id: String,
@@ -215,7 +228,6 @@ pub struct ImportedTransactions {
     pub transactions: Vec<ImportedTransaction>,
     #[serde(default)]
     pub pending_ids: Vec<String>,
-    pub latest: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -223,6 +235,7 @@ pub struct ImportSummary {
     pub accounts: usize,
     pub transactions: usize,
     pub deleted_pending: usize,
+    pub categorized: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -259,6 +272,7 @@ pub struct SourceRecord {
     #[serde(flatten)]
     pub transaction: SourceTransactionData,
     pub raw: Value,
+    pub duplicate_of: Option<String>,
     pub updated_at: String,
 }
 

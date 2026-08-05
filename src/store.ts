@@ -1,5 +1,5 @@
 import { Atom, type Registry } from "@effect-atom/atom-react"
-import { Effect } from "effect"
+import { Effect, Fiber } from "effect"
 import { appendFile, mkdir } from "node:fs/promises"
 
 export type Account = {
@@ -9,7 +9,6 @@ export type Account = {
   name: string
   imported_name: string | null
   type: "asset" | "liability" | "income" | "expense" | "equity"
-  latest_external_transaction_id: string | null
   balance: number
   has_children: boolean
 }
@@ -21,17 +20,19 @@ export const UNBALANCED_TRANSACTIONS_ID = "unbalanced-transactions"
 export const accountTypes = ["asset", "liability", "income", "expense", "equity"] as const
 export type AccountView = "assets-liabilities" | "income-expenses"
 
-export type InferenceConfig = {
+export type PluginConfig = {
   command: string[]
   cwd: string | null
   env: string[]
   config: unknown
-  model: string | null
   initializeTimeoutMs: number
   requestTimeoutMs: number
 }
 
-export type InferenceStatus = {
+export type InferenceConfig = PluginConfig & { model: string | null }
+export type ImportPluginConfig = PluginConfig
+
+export type PluginStatus = {
   ready: boolean
   detail?: string | null
   reason?: string | null
@@ -39,6 +40,7 @@ export type InferenceStatus = {
   plugin?: { name: string; version: string } | null
   capabilities?: {
     inference: boolean
+    transactionImport: boolean
     structuredOutput: boolean
     cancellation: boolean
   } | null
@@ -54,11 +56,16 @@ export type InferenceModel = {
 type InferenceUiState = {
   configPath: string | null
   config: InferenceConfig | null
-  status: InferenceStatus | null
+  importConfig: ImportPluginConfig | null
+  status: PluginStatus | null
+  importStatus: PluginStatus | null
   models: InferenceModel[]
   busy: boolean
   message: string
   error: string | null
+  importBusy: boolean
+  importMessage: string
+  importError: string | null
   testLog: string[]
 }
 
@@ -69,7 +76,6 @@ const allTransactionsAccount: AccountNode = {
   name: "All transactions",
   imported_name: null,
   type: "asset",
-  latest_external_transaction_id: null,
   balance: 0,
   has_children: false,
   depth: 0,
@@ -175,14 +181,20 @@ export const stateAtom = Atom.make(initialState).pipe(Atom.keepAlive)
 export const collapsedAccountIdsAtom = Atom.make(new Set<string>() as ReadonlySet<string>).pipe(Atom.keepAlive)
 export const accountViewAtom = Atom.make("assets-liabilities" as AccountView).pipe(Atom.keepAlive)
 export const transactionSearchAtom = Atom.make("").pipe(Atom.keepAlive)
+export const syncLogAtom = Atom.make({ running: false, lines: [] as string[] }).pipe(Atom.keepAlive)
 export const inferenceAtom = Atom.make({
   configPath: null,
   config: null,
+  importConfig: null,
   status: null,
+  importStatus: null,
   models: [],
   busy: false,
   message: "Inference is not configured",
   error: null,
+  importBusy: false,
+  importMessage: "Transaction import is not configured",
+  importError: null,
   testLog: [],
 } as InferenceUiState).pipe(Atom.keepAlive)
 
@@ -438,18 +450,17 @@ const executeInference = (
 
 const refreshInference = (registry: Registry.Registry, config: InferenceConfig) =>
   Effect.gen(function* () {
-    const status = yield* request<InferenceStatus>("/inference/status")
+    const status = yield* request<PluginStatus>("/inference/status")
     const response = yield* request<{ models: InferenceModel[] }>("/inference/models")
-    registry.set(inferenceAtom, {
-      configPath: registry.get(inferenceAtom).configPath,
+    registry.update(inferenceAtom, (current) => ({
+      ...current,
       config,
       status,
       models: response.models,
       busy: false,
       message: status.ready ? "Inference is ready" : (status.reason ?? "Inference needs setup"),
       error: null,
-      testLog: registry.get(inferenceAtom).testLog,
-    })
+    }))
   })
 
 export const loadInference = (registry: Registry.Registry) => {
@@ -457,22 +468,97 @@ export const loadInference = (registry: Registry.Registry) => {
   executeInference(
     registry,
     Effect.gen(function* () {
-      const response = yield* request<{ path: string; inference: InferenceConfig | null }>("/inference")
+      const response = yield* request<{
+        path: string
+        inference: InferenceConfig | null
+        import: ImportPluginConfig | null
+      }>("/plugins")
+      registry.update(inferenceAtom, (state) => ({
+        ...state,
+        configPath: response.path,
+        importConfig: response.import,
+      }))
       if (!response.inference) {
-        registry.set(inferenceAtom, {
-          configPath: response.path,
+        registry.update(inferenceAtom, (state) => ({
+          ...state,
           config: null,
           status: null,
           models: [],
           busy: false,
           message: `Configure inference in ${response.path}`,
           error: null,
-          testLog: registry.get(inferenceAtom).testLog,
-        })
+        }))
         return
       }
-      registry.update(inferenceAtom, (state) => ({ ...state, configPath: response.path }))
       yield* refreshInference(registry, response.inference)
+    }),
+  )
+}
+
+const executeImport = (registry: Registry.Registry, effect: Effect.Effect<void, Error>) => {
+  Effect.runFork(effect.pipe(Effect.catchAll((error) => Effect.sync(() => {
+    registry.update(inferenceAtom, (state) => ({
+      ...state,
+      importBusy: false,
+      importMessage: "Transaction import request failed",
+      importError: error.message,
+    }))
+  }))))
+}
+
+export const loadImportPlugin = (registry: Registry.Registry) => {
+  registry.update(inferenceAtom, (state) => ({
+    ...state,
+    importBusy: true,
+    importError: null,
+    importMessage: "Loading transaction import",
+  }))
+  executeImport(
+    registry,
+    Effect.gen(function* () {
+      const response = yield* request<{
+        path: string
+        inference: InferenceConfig | null
+        import: ImportPluginConfig | null
+      }>("/plugins")
+      if (!response.import) {
+        registry.update(inferenceAtom, (state) => ({
+          ...state,
+          configPath: response.path,
+          importConfig: null,
+          importStatus: null,
+          importBusy: false,
+          importMessage: `Configure transaction import in ${response.path}`,
+          importError: null,
+        }))
+        return
+      }
+      const status = yield* request<PluginStatus>("/import/status")
+      registry.update(inferenceAtom, (state) => ({
+        ...state,
+        configPath: response.path,
+        importConfig: response.import,
+        importStatus: status,
+        importBusy: false,
+        importMessage: status.ready ? "Transaction import is ready" : (status.reason ?? "Transaction import needs setup"),
+        importError: null,
+      }))
+    }),
+  )
+}
+
+export const restartImportPlugin = (registry: Registry.Registry) => {
+  registry.update(inferenceAtom, (state) => ({
+    ...state,
+    importBusy: true,
+    importError: null,
+    importMessage: "Restarting transaction import",
+  }))
+  executeImport(
+    registry,
+    Effect.gen(function* () {
+      yield* request<{ healthy: boolean }>("/import/restart", { method: "POST" })
+      loadImportPlugin(registry)
     }),
   )
 }
@@ -565,12 +651,17 @@ export const restartInference = (registry: Registry.Registry) => {
     registry,
     Effect.gen(function* () {
       yield* request<{ healthy: boolean }>("/inference/restart", { method: "POST" })
-      const response = yield* request<{ path: string; inference: InferenceConfig | null }>("/inference")
+      const response = yield* request<{
+        path: string
+        inference: InferenceConfig | null
+        import: ImportPluginConfig | null
+      }>("/plugins")
       if (response.inference) {
         registry.update(inferenceAtom, (state) => ({ ...state, configPath: response.path }))
         yield* refreshInference(registry, response.inference)
       } else {
-        registry.set(inferenceAtom, {
+        registry.update(inferenceAtom, (state) => ({
+          ...state,
           configPath: response.path,
           config: null,
           status: null,
@@ -578,8 +669,7 @@ export const restartInference = (registry: Registry.Registry) => {
           busy: false,
           message: `Configure inference in ${response.path}`,
           error: null,
-          testLog: registry.get(inferenceAtom).testLog,
-        })
+        }))
       }
     }),
   )
@@ -1184,8 +1274,18 @@ export const saveTransactionChanges = (
 }
 
 export const sync = (registry: Registry.Registry) => {
-  const selected = registry.get(stateAtom).selectedAccountId
+  const current = registry.get(stateAtom)
+  if (current.busy) return
+  const selected = current.selectedAccountId
+  registry.set(syncLogAtom, { running: true, lines: ["Starting transaction sync"] })
   setBusy(registry, "Syncing all accounts")
+  const refreshLog = request<{ running: boolean; lines: string[] }>("/import/logs").pipe(
+    Effect.tap((log) => Effect.sync(() => registry.set(syncLogAtom, log))),
+    Effect.catchAll(() => Effect.void),
+  )
+  const polling = Effect.runFork(
+    Effect.forever(refreshLog.pipe(Effect.zipRight(Effect.sleep(300)))),
+  )
   execute(
     registry,
     Effect.gen(function* () {
@@ -1193,12 +1293,16 @@ export const sync = (registry: Registry.Registry) => {
         accounts: number
         transactions: number
         deleted_pending: number
+        categorized: number
       }>("/import/run", { method: "POST" })
+      yield* refreshLog
       yield* load(
         registry,
         selected,
-        `Synced ${summary.accounts} accounts / ${summary.transactions} transactions`,
+        `Synced ${summary.accounts} accounts / ${summary.transactions} transactions / categorized ${summary.categorized}`,
       )
-    }),
+    }).pipe(
+      Effect.ensuring(Fiber.interrupt(polling).pipe(Effect.zipRight(refreshLog))),
+    ),
   )
 }

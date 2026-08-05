@@ -1,0 +1,37 @@
+{
+  "history": [
+    { "importedPayee": "SQ *JOES COFFEE #104 RICHMOND VA", "resolvedPayee": "Joe's Coffee" },
+    { "importedPayee": "SQ *JOES COFFEE #108 MIDLOTHIAN", "resolvedPayee": "Joe's Coffee" },
+    { "importedPayee": "JOES COFFEE RICHMOND", "resolvedPayee": "Joe's Coffee" },
+    { "importedPayee": "POS PURCHASE STARBUCKS #1842", "resolvedPayee": "Starbucks" },
+    { "importedPayee": "STARBUCKS STORE 4812", "resolvedPayee": "Starbucks" },
+    { "importedPayee": "TST*STARBUCKS 9910", "resolvedPayee": "Starbucks" },
+    { "importedPayee": "STARBUCKS MOBILE", "resolvedPayee": "Starbucks" },
+    { "importedPayee": "STARBUCKS MOBILE", "resolvedPayee": "Starbucks" },
+    { "importedPayee": "STARBUCKS MOBILE", "resolvedPayee": "Starbucks" },
+    { "importedPayee": "STARBUCKS MOBILE", "resolvedPayee": "Starbucks" },
+    { "importedPayee": "STARBUCKS MOBILE", "resolvedPayee": "Starbucks" },
+    { "importedPayee": "POS PURCHASE TARGET #0192", "resolvedPayee": "Target" },
+    { "importedPayee": "TARGET T-0192 MIDLOTHIAN", "resolvedPayee": "Target" },
+    { "importedPayee": "TARGET.COM 800-591-3869", "resolvedPayee": "Target" },
+    { "importedPayee": "POS PURCHASE KROGER #4481", "resolvedPayee": "Kroger" },
+    { "importedPayee": "KROGER FUEL 4481", "resolvedPayee": "Kroger" },
+    { "importedPayee": "KROGER STORE #4481", "resolvedPayee": "Kroger" },
+    { "importedPayee": "AMAZON MKTPLACE PMTS", "resolvedPayee": "Amazon" },
+    { "importedPayee": "AMAZON.COM*XY98", "resolvedPayee": "Amazon" },
+    { "importedPayee": "AMAZON WEB SERVICES", "resolvedPayee": "Amazon Web Services" },
+    { "importedPayee": "AWS EMEA", "resolvedPayee": "Amazon Web Services" },
+    { "importedPayee": "PAYMENT", "resolvedPayee": "Credit Card Payment" },
+    { "importedPayee": "PAYMENT", "resolvedPayee": "Mortgage Payment" }
+  ],
+  "evaluations": [
+    { "name": "exact normalization", "importedPayee": "  STARBUCKS MOBILE  ", "expected": "Starbucks" },
+    { "name": "square store variation", "importedPayee": "SQ *JOES COFFEE #112 RICHMOND", "expected": "Joe's Coffee" },
+    { "name": "processor wrapped Starbucks", "importedPayee": "TST * STARBUCKS #7731", "expected": "Starbucks" },
+    { "name": "target store variation", "importedPayee": "POS PURCHASE TARGET #0199", "expected": "Target" },
+    { "name": "kroger store variation", "importedPayee": "KROGER STORE #4489", "expected": "Kroger" },
+    { "name": "AWS exact identity", "importedPayee": "AMAZON WEB SERVICES", "expected": "Amazon Web Services" },
+    { "name": "ambiguous generic payment without account", "importedPayee": "PAYMENT", "expected": null },
+    { "name": "unknown merchant", "importedPayee": "RIVER CITY BOOKS #441", "expected": null }
+  ]
+}

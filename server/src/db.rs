@@ -11,15 +11,16 @@ use uuid::Uuid;
 
 use crate::model::{
     AccountCursor, AccountDeletion, AccountInput, AccountRecord, AccountTransaction,
-    AccountTransactionsPage, AccountType, Change, ImportConfig, ImportedAccount,
-    ImportedTransaction, ImportedTransactions, ModelError, OtherPosting, Posting, PostingData,
-    Projection, SourceBundle, SourceInput, SourceRecord, SourceTransactionData, StoredChange,
-    reduce,
+    AccountTransactionsPage, AccountType, Change, ImportedAccount, ImportedTransaction,
+    ImportedTransactions, ModelError, OtherPosting, Posting, PostingData, Projection, SourceBundle,
+    SourceInput, SourceRecord, SourceTransactionData, StoredChange, reduce,
 };
 
 pub struct Database {
     connection: Connection,
 }
+
+const IMPORT_SOURCE_ID: &str = "1d0e63d1-47f5-5f67-92e1-fc7a575b34c1";
 
 #[derive(Debug, Error)]
 pub enum DatabaseError {
@@ -39,12 +40,6 @@ pub enum DatabaseError {
     SyncedAccountStructure(String),
     #[error("deleting an income or expense account must preserve its transactions")]
     CategoryTransactionDeletion,
-    #[error("importer is not configured")]
-    ImportNotConfigured,
-    #[error("invalid importer URL: {0}")]
-    InvalidImportUrl(String),
-    #[error("import request failed: {0}")]
-    ImportRequest(String),
     #[error("database lock was poisoned")]
     Poisoned,
 }
@@ -164,46 +159,11 @@ impl Database {
         Ok(deletion)
     }
 
-    pub fn configure_import(&mut self, url: String) -> Result<ImportConfig, DatabaseError> {
-        let id = self
-            .connection
-            .query_row(
-                "SELECT id FROM import_config WHERE singleton = 1",
-                [],
-                |row| row.get(0),
-            )
-            .optional()?
-            .unwrap_or_else(|| Uuid::now_v7().to_string());
-        self.connection.execute(
-            "INSERT INTO import_config (singleton, id, url) VALUES (1, ?, ?)
-             ON CONFLICT(singleton) DO UPDATE SET url = excluded.url",
-            params![id, url],
-        )?;
-        self.get_import()
-    }
-
-    pub fn get_import(&self) -> Result<ImportConfig, DatabaseError> {
-        self.connection
-            .query_row(
-                "SELECT id, url FROM import_config WHERE singleton = 1",
-                [],
-                |row| {
-                    Ok(ImportConfig {
-                        id: row.get(0)?,
-                        url: row.get(1)?,
-                    })
-                },
-            )
-            .optional()?
-            .ok_or(DatabaseError::ImportNotConfigured)
-    }
-
     pub fn sync_accounts(
         &mut self,
-        config: &ImportConfig,
         accounts: &[ImportedAccount],
-    ) -> Result<Vec<AccountRecord>, DatabaseError> {
-        let namespace = parse_namespace(&config.id)?;
+    ) -> Result<Vec<(AccountRecord, bool)>, DatabaseError> {
+        let namespace = import_namespace();
         let mut external_ids = HashSet::new();
         for account in accounts {
             validate_external_id(&account.id)?;
@@ -216,6 +176,17 @@ impl Database {
         }
 
         let tx = self.connection.transaction()?;
+        let mut new_account_ids = HashSet::new();
+        for account in accounts {
+            let id = imported_uuid(&namespace, "account", &account.id);
+            let exists = tx
+                .query_row("SELECT 1 FROM accounts WHERE id = ?", [&id], |_| Ok(()))
+                .optional()?
+                .is_some();
+            if !exists {
+                new_account_ids.insert(id);
+            }
+        }
         let missing_accounts = {
             let mut statement =
                 tx.prepare("SELECT id, external_id FROM accounts WHERE external_id IS NOT NULL")?;
@@ -261,7 +232,7 @@ impl Database {
             for external_id in removed_external_ids {
                 tx.execute(
                     "DELETE FROM transactions_source WHERE source = ? AND external_account_id = ?",
-                    params![config.id, external_id],
+                    params![IMPORT_SOURCE_ID, external_id],
                 )?;
             }
             delete_accounts(&tx, &account_ids, false)?;
@@ -304,21 +275,24 @@ impl Database {
 
         accounts
             .iter()
-            .map(|account| self.get_account(&imported_uuid(&namespace, "account", &account.id)))
+            .map(|account| {
+                let id = imported_uuid(&namespace, "account", &account.id);
+                self.get_account(&id)
+                    .map(|account| (account, new_account_ids.contains(&id)))
+            })
             .collect()
     }
 
     pub fn sync_transactions(
         &mut self,
-        config: &ImportConfig,
         account: &AccountRecord,
         imported: ImportedTransactions,
-    ) -> Result<(usize, usize), DatabaseError> {
+    ) -> Result<(usize, usize, Vec<String>), DatabaseError> {
         let external_account_id = account
             .external_id
             .as_deref()
             .ok_or_else(|| DatabaseError::AccountNotFound(account.id.clone()))?;
-        let namespace = parse_namespace(&config.id)?;
+        let namespace = import_namespace();
         let mut transaction_ids = HashSet::new();
         let pending_ids: HashSet<&str> = imported.pending_ids.iter().map(String::as_str).collect();
         for transaction in &imported.transactions {
@@ -332,15 +306,27 @@ impl Database {
         }
 
         let tx = self.connection.transaction()?;
+        let mut new_source_ids = Vec::new();
         for transaction in &imported.transactions {
             let source_id = imported_uuid(
                 &namespace,
                 "transaction",
                 &format!("{external_account_id}:{}", transaction.id),
             );
-            let input = imported_source(config, account, transaction);
+            let input = imported_source(account, transaction);
+            let is_new = tx
+                .query_row(
+                    "SELECT 1 FROM transactions_source WHERE id = ?",
+                    [&source_id],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_none();
             upsert_source(&tx, &source_id, &input)?;
             rebuild_projection(&tx, &source_id)?;
+            if is_new {
+                new_source_ids.push(source_id);
+            }
         }
 
         let pending_sources = {
@@ -349,7 +335,7 @@ impl Database {
                  FROM transactions_source
                  WHERE account_id = ? AND source = ? AND pending = 1",
             )?;
-            let rows = statement.query_map(params![account.id, config.id], |row| {
+            let rows = statement.query_map(params![account.id, IMPORT_SOURCE_ID], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
@@ -361,12 +347,8 @@ impl Database {
                 deleted_pending += 1;
             }
         }
-        tx.execute(
-            "UPDATE accounts SET latest_external_transaction_id = ? WHERE id = ?",
-            params![imported.latest, account.id],
-        )?;
         tx.commit()?;
-        Ok((imported.transactions.len(), deleted_pending))
+        Ok((imported.transactions.len(), deleted_pending, new_source_ids))
     }
 
     pub fn account_sync_start_date(&self, account_id: &str) -> Result<String, DatabaseError> {
@@ -385,19 +367,6 @@ impl Database {
                     ELSE date(MIN(latest_posted, COALESCE(oldest_pending, latest_posted)), '-7 days')
                  END
                  FROM dates",
-                [account_id],
-                |row| row.get(0),
-            )
-            .map_err(Into::into)
-    }
-
-    pub fn account_needs_initial_sync(&self, account_id: &str) -> Result<bool, DatabaseError> {
-        ensure_account(&self.connection, account_id)?;
-        self.connection
-            .query_row(
-                "SELECT NOT EXISTS(
-                    SELECT 1 FROM transactions_source WHERE account_id = ?
-                 )",
                 [account_id],
                 |row| row.get(0),
             )
@@ -425,7 +394,6 @@ impl Database {
                 accounts.name,
                 accounts.imported_name,
                 accounts.type,
-                accounts.latest_external_transaction_id,
                 balances.balance,
                 EXISTS(SELECT 1 FROM accounts AS child WHERE child.parent_id = accounts.id)
              FROM accounts
@@ -440,9 +408,8 @@ impl Database {
                 row.get::<_, String>(3)?,
                 row.get::<_, Option<String>>(4)?,
                 row.get::<_, String>(5)?,
-                row.get::<_, Option<String>>(6)?,
-                row.get::<_, i64>(7)?,
-                row.get::<_, bool>(8)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, bool>(7)?,
             ))
         })?;
         rows.map(|row| {
@@ -453,7 +420,6 @@ impl Database {
                 name,
                 imported_name,
                 account_type,
-                latest,
                 balance,
                 has_children,
             ) = row?;
@@ -464,7 +430,6 @@ impl Database {
                 name,
                 imported_name,
                 account_type: AccountType::parse(&account_type)?,
-                latest_external_transaction_id: latest,
                 balance,
                 has_children,
             })
@@ -538,6 +503,120 @@ impl Database {
                 unallocated_amount: expected.unallocated_amount,
             },
         })
+    }
+
+    pub fn transfer_pairs_for_accounts(
+        &self,
+        account_ids: &[String],
+    ) -> Result<Vec<(SourceBundle, SourceBundle)>, DatabaseError> {
+        if account_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = std::iter::repeat_n("?", account_ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT left_source.id, right_source.id
+             FROM transactions_source AS left_source
+             JOIN transactions_source AS right_source ON left_source.id < right_source.id
+             JOIN accounts AS left_account ON left_account.id = left_source.account_id
+             JOIN accounts AS right_account ON right_account.id = right_source.account_id
+             WHERE left_source.duplicate_of IS NULL
+               AND right_source.duplicate_of IS NULL
+               AND left_source.opening_balance = 0
+               AND right_source.opening_balance = 0
+               AND left_source.amount != 0
+               AND left_source.amount + right_source.amount = 0
+               AND left_source.account_id != right_source.account_id
+               AND left_account.type IN ('asset', 'liability')
+               AND right_account.type IN ('asset', 'liability')
+               AND (left_source.account_id IN ({placeholders})
+                    OR right_source.account_id IN ({placeholders}))
+               AND right_source.date BETWEEN date(left_source.date, '-3 days')
+                                         AND date(left_source.date, '+3 days')
+               AND (SELECT COUNT(*) FROM postings WHERE source_id = left_source.id) = 1
+               AND (SELECT COUNT(*) FROM postings WHERE source_id = right_source.id) = 1
+             ORDER BY ABS(julianday(left_source.date) - julianday(right_source.date)),
+                      left_source.id, right_source.id"
+        );
+        let mut statement = self.connection.prepare(&sql)?;
+        let values = account_ids
+            .iter()
+            .chain(account_ids.iter())
+            .map(|id| SqlValue::Text(id.clone()))
+            .collect::<Vec<_>>();
+        let rows = statement.query_map(params_from_iter(values.iter()), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|(left, right)| Ok((self.get_source(&left)?, self.get_source(&right)?)))
+            .collect()
+    }
+
+    pub fn reconcile_transfer(
+        &mut self,
+        canonical_id: &str,
+        duplicate_id: &str,
+    ) -> Result<bool, DatabaseError> {
+        if canonical_id == duplicate_id {
+            return Ok(false);
+        }
+        let canonical = self.get_source(canonical_id)?;
+        let duplicate = self.get_source(duplicate_id)?;
+        let Some(counterpart_account_id) = duplicate.source.transaction.account_id.clone() else {
+            return Ok(false);
+        };
+        if canonical.source.duplicate_of.is_some()
+            || duplicate.source.duplicate_of.is_some()
+            || canonical.projection.postings.len() != 1
+            || duplicate.projection.postings.len() != 1
+            || canonical.source.transaction.account_id.as_deref()
+                == Some(counterpart_account_id.as_str())
+            || canonical
+                .source
+                .transaction
+                .amount
+                .checked_add(duplicate.source.transaction.amount)
+                != Some(0)
+        {
+            return Ok(false);
+        }
+
+        let posting_id = Uuid::now_v7().to_string();
+        let changes = vec![
+            Change::Split {
+                target_id: posting_id.clone(),
+            },
+            Change::Set {
+                target_id: posting_id.clone(),
+                field: "account_id".into(),
+                value: Value::String(counterpart_account_id),
+            },
+            Change::Set {
+                target_id: posting_id,
+                field: "amount".into(),
+                value: Value::from(canonical.projection.unallocated_amount),
+            },
+        ];
+        let tx = self.connection.transaction()?;
+        for change in changes {
+            let (operation, target_id, field, value_json) = encode_change(&change)?;
+            tx.execute(
+                "INSERT INTO transactions_changes (
+                    source_id, operation, target_id, field, value_json
+                 ) VALUES (?, ?, ?, ?, ?)",
+                params![canonical_id, operation, target_id, field, value_json],
+            )?;
+        }
+        tx.execute(
+            "UPDATE transactions_source SET duplicate_of = ? WHERE id = ?",
+            params![canonical_id, duplicate_id],
+        )?;
+        rebuild_projection(&tx, canonical_id)?;
+        rebuild_projection(&tx, duplicate_id)?;
+        tx.commit()?;
+        Ok(true)
     }
 
     pub fn list_account(
@@ -854,9 +933,8 @@ impl Database {
                     accounts.external_id,
                     accounts.name,
                     accounts.imported_name,
-                    accounts.type,
-                    accounts.latest_external_transaction_id,
-                    (SELECT COALESCE(SUM(postings.amount), 0)
+                     accounts.type,
+                     (SELECT COALESCE(SUM(postings.amount), 0)
                      FROM postings
                      WHERE postings.account_id IN (SELECT id FROM descendants)),
                     EXISTS(SELECT 1 FROM accounts AS child WHERE child.parent_id = accounts.id)
@@ -870,9 +948,8 @@ impl Database {
                         row.get::<_, String>(3)?,
                         row.get::<_, Option<String>>(4)?,
                         row.get::<_, String>(5)?,
-                        row.get::<_, Option<String>>(6)?,
-                        row.get::<_, i64>(7)?,
-                        row.get::<_, bool>(8)?,
+                        row.get::<_, i64>(6)?,
+                        row.get::<_, bool>(7)?,
                     ))
                 },
             )
@@ -886,7 +963,6 @@ impl Database {
                     name,
                     imported_name,
                     account_type,
-                    latest,
                     balance,
                     has_children,
                 )| {
@@ -897,7 +973,6 @@ impl Database {
                         name,
                         imported_name,
                         account_type: AccountType::parse(&account_type)?,
-                        latest_external_transaction_id: latest,
                         balance,
                         has_children,
                     })
@@ -908,6 +983,10 @@ impl Database {
 
 fn rebuild_projection(tx: &Transaction<'_>, source_id: &str) -> Result<(), DatabaseError> {
     let source = load_source(tx, source_id)?;
+    if source.duplicate_of.is_some() {
+        tx.execute("DELETE FROM postings WHERE source_id = ?", [source_id])?;
+        return Ok(());
+    }
     let changes = load_changes(tx, source_id)?;
     let projection = reduce(source_id, &source.transaction, &changes)?;
 
@@ -980,13 +1059,9 @@ fn upsert_source(tx: &Transaction<'_>, id: &str, input: &SourceInput) -> Result<
     Ok(())
 }
 
-fn imported_source(
-    config: &ImportConfig,
-    account: &AccountRecord,
-    transaction: &ImportedTransaction,
-) -> SourceInput {
+fn imported_source(account: &AccountRecord, transaction: &ImportedTransaction) -> SourceInput {
     SourceInput {
-        source: config.id.clone(),
+        source: IMPORT_SOURCE_ID.into(),
         external_account_id: account.external_id.clone().unwrap_or_default(),
         external_transaction_id: transaction.id.clone(),
         transaction: SourceTransactionData {
@@ -1003,10 +1078,8 @@ fn imported_source(
     }
 }
 
-fn parse_namespace(id: &str) -> Result<Uuid, DatabaseError> {
-    Uuid::parse_str(id)
-        .map_err(|_| ModelError::InvalidUuid(id.to_owned()))
-        .map_err(Into::into)
+fn import_namespace() -> Uuid {
+    Uuid::parse_str(IMPORT_SOURCE_ID).expect("import source namespace is valid")
 }
 
 fn imported_uuid(namespace: &Uuid, kind: &str, external_id: &str) -> String {
@@ -1173,7 +1246,8 @@ fn load_source(connection: &Connection, id: &str) -> Result<SourceRecord, Databa
         .query_row(
             "SELECT
                 id, source, external_account_id, external_transaction_id, account_id, date,
-                payee, amount, category, pending, opening_balance, notes, raw_json, updated_at
+                payee, amount, category, pending, opening_balance, notes, raw_json, duplicate_of,
+                updated_at
              FROM transactions_source
              WHERE id = ?",
             [id],
@@ -1196,7 +1270,8 @@ fn load_source(connection: &Connection, id: &str) -> Result<SourceRecord, Databa
                             notes: row.get(11)?,
                         },
                         raw: Value::Null,
-                        updated_at: row.get(13)?,
+                        duplicate_of: row.get(13)?,
+                        updated_at: row.get(14)?,
                     },
                     raw_json,
                 ))

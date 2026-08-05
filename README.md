@@ -22,27 +22,19 @@ cargo run --manifest-path server/Cargo.toml
 It listens on `127.0.0.1:47832` and stores data in `.money-tui/money.db` by default. Override these
 with `MONET_SERVER_ADDR` and `MONET_DB_PATH`.
 
-Configure and run a user-hosted importer with:
-
-```sh
-curl -X PUT http://127.0.0.1:47832/import \
-  -H 'content-type: application/json' \
-  --data '{"url":"http://127.0.0.1:9000"}'
-
-curl -X POST http://127.0.0.1:47832/import/run
-```
-
-The importer serves `GET /accounts` and `GET /accounts/{account_id}/transactions`. The complete
-request and response contract is documented in the architecture note.
+Application and plugin logs append to `.money-tui/monet.log`. Override the path with `MONET_LOG`.
+Inference prompts and responses are written to correlated `<id>_req.txt` and `<id>_res.json` files
+under `.money-tui/logs/inference`. Request files contain only the system prompt and prompt, with JSON
+prompts pretty-printed. Override the directory with `MONET_INFERENCE_LOG_DIR`.
 
 The current decisions, operation model, HTTP API, and implementation checklist live in
 `/mnt/life/projects/finance-app-architecture.md`.
 
-## Inference
+## Plugins
 
 Monet creates its user configuration at `~/.config/monet/config.json`. Override the path with
-`MONET_CONFIG_PATH`. Inference plugins are directly executable commands that speak JSON-RPC 2.0 as
-newline-delimited JSON over stdin/stdout.
+`MONET_CONFIG_PATH`. Inference and transaction import plugins are directly executable commands that
+speak JSON-RPC 2.0 as newline-delimited JSON over stdin/stdout.
 
 Configure the bundled OpenCode plugin manually:
 
@@ -56,13 +48,16 @@ Configure the bundled OpenCode plugin manually:
     "model": null,
     "initializeTimeoutMs": 5000,
     "requestTimeoutMs": 60000
-  }
+  },
+  "import": null
 }
 ```
 
-The Inference screen discovers models, tests generation, and restarts the configured process. Command
-and plugin-specific settings remain file-owned. See [Inference plugins](docs/inference-plugins.md) for
-the protocol and JavaScript SDK.
+Monet bundles only the OpenCode inference adapter. Transaction import plugins are user-provided and
+configured under `import`. The Plugins screen reports both processes and restarts them; `[s] sync`
+runs the configured transaction import. When new accounts are registered, Monet asks the inference
+plugin to reject false positives from a system-wide transfer-candidate pass involving those new
+accounts. See [Monet plugins](docs/plugins.md) for the protocol and JavaScript SDK.
 
 ## Terminal Control
 

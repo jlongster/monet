@@ -1,8 +1,8 @@
 import {
-  defineInferencePlugin,
-  serveInferencePlugin,
+  definePlugin,
+  servePlugin,
   type GenerateRequest,
-} from "../../inference-plugin-sdk/index"
+} from "../../plugin-sdk/index"
 
 const api = async (method: string, path: string, body?: unknown) => {
   const command = ["opencode2", "api", method, path]
@@ -36,9 +36,10 @@ const models = async () => {
 const modelReference = (model: { id: string; providerID: string }) =>
   `${model.providerID}/${model.id}`
 
-const plugin = defineInferencePlugin({
+const plugin = definePlugin({
   name: "OpenCode",
   version: "1.0.0",
+  structuredOutput: true,
 
   async status() {
     await api("get", "/api/health")
@@ -71,17 +72,25 @@ const plugin = defineInferencePlugin({
       ? available.find((model) => modelReference(model) === request.model)
       : undefined
     if (request.model && !selected) throw new Error(`OpenCode model '${request.model}' was not found`)
-    const prompt = [request.system, request.prompt].filter(Boolean).join("\n\n")
+    const prompt = [
+      request.system,
+      request.prompt,
+      request.outputSchema
+        ? `Return only JSON matching this JSON Schema:\n${JSON.stringify(request.outputSchema)}`
+        : undefined,
+    ].filter(Boolean).join("\n\n")
     const response = await api("post", "/api/generate", {
       prompt,
       ...(selected ? { model: { id: selected.id, providerID: selected.providerID } } : {}),
     })
+    const text = response.data.text
     return {
-      text: response.data.text,
+      text,
+      ...(request.outputSchema ? { structured: JSON.parse(text) } : {}),
       model: selected ? modelReference(selected) : "default",
     }
   },
 })
 
 export default plugin
-await serveInferencePlugin(plugin)
+await servePlugin(plugin)

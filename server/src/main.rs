@@ -1,10 +1,12 @@
+mod app_log;
 mod config;
 mod db;
-mod inference;
 mod model;
 mod perf;
+mod plugin;
 
 use std::{
+    collections::{HashMap, HashSet},
     env, fs,
     net::SocketAddr,
     path::Path,
@@ -21,26 +23,28 @@ use axum::{
     routing::{get, post, put},
 };
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use crate::{
     config::{ConfigError, ConfigFile},
     db::{Database, DatabaseError},
-    inference::{InferenceError, InferenceManager},
     model::{
         AccountCursor, AccountDeletion, AccountInput, AccountRecord, AccountTransactionsPage,
-        AccountType, ChangesInput, ImportConfig, ImportConfigInput, ImportSummary,
-        ImportedAccounts, ImportedTransactions, InferenceConfig, InferenceConfigFile,
-        InferenceGenerateInput, InferenceGenerateOutput, InferenceModelInput, InferenceModels,
-        InferenceStatus, ModelError, SourceBundle, SourceInput,
+        AccountType, Change, ChangesInput, ImportPluginConfig, ImportSummary,
+        ImportTransactionsInput, InferenceConfig, InferenceGenerateInput, InferenceGenerateOutput,
+        InferenceModelInput, InferenceModels, ModelError, PluginStatus, PluginsConfigFile,
+        SourceBundle, SourceInput,
     },
+    plugin::{ImportManager, InferenceManager, PluginError},
 };
 
 #[derive(Clone)]
 struct AppState {
     database: Arc<Mutex<Database>>,
-    http: reqwest::Client,
     inference: Arc<InferenceManager>,
+    importer: Arc<ImportManager>,
     config: Arc<ConfigFile>,
+    import_log: Arc<Mutex<ImportLog>>,
 }
 
 #[derive(Serialize)]
@@ -51,6 +55,12 @@ struct Health {
 #[derive(Serialize)]
 struct TransactionCount {
     count: usize,
+}
+
+#[derive(Clone, Default, Serialize)]
+struct ImportLog {
+    running: bool,
+    lines: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -73,9 +83,18 @@ struct DeleteAccountQuery {
     delete_transactions: bool,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InitialTransferReview {
+    not_transfers: Vec<String>,
+}
+
+const OPENING_BALANCES_ACCOUNT_ID: &str = "b699843f-11bd-54e8-888b-452cb32be97b";
+
+#[derive(Debug)]
 enum ApiError {
     Database(DatabaseError),
-    Inference(InferenceError),
+    Plugin(PluginError),
     Config(ConfigError),
 }
 
@@ -87,35 +106,32 @@ impl IntoResponse for ApiError {
                     DatabaseError::SourceNotFound(_) | DatabaseError::AccountNotFound(_) => {
                         StatusCode::NOT_FOUND
                     }
-                    DatabaseError::ImportNotConfigured => StatusCode::NOT_FOUND,
                     DatabaseError::Model(_)
                     | DatabaseError::Json(_)
-                    | DatabaseError::InvalidImportUrl(_)
                     | DatabaseError::SyncedAccountDeletion(_)
                     | DatabaseError::SyncedAccountStructure(_)
                     | DatabaseError::CategoryTransactionDeletion => {
                         StatusCode::UNPROCESSABLE_ENTITY
                     }
-                    DatabaseError::ImportRequest(_) => StatusCode::BAD_GATEWAY,
                     DatabaseError::Sql(_) | DatabaseError::Poisoned => {
                         StatusCode::INTERNAL_SERVER_ERROR
                     }
                 };
                 (status, error.to_string())
             }
-            Self::Inference(error) => {
+            Self::Plugin(error) => {
                 let status = match error {
-                    InferenceError::NotConfigured => StatusCode::NOT_FOUND,
-                    InferenceError::InvalidCommand | InferenceError::Protocol(_) => {
+                    PluginError::NotConfigured => StatusCode::NOT_FOUND,
+                    PluginError::InvalidCommand | PluginError::Protocol(_) => {
                         StatusCode::UNPROCESSABLE_ENTITY
                     }
-                    InferenceError::Timeout => StatusCode::GATEWAY_TIMEOUT,
-                    InferenceError::Launch(_)
-                    | InferenceError::Io(_)
-                    | InferenceError::Json(_)
-                    | InferenceError::Exited
-                    | InferenceError::MessageTooLarge
-                    | InferenceError::Remote { .. } => StatusCode::BAD_GATEWAY,
+                    PluginError::Timeout => StatusCode::GATEWAY_TIMEOUT,
+                    PluginError::Launch(_)
+                    | PluginError::Io(_)
+                    | PluginError::Json(_)
+                    | PluginError::Exited
+                    | PluginError::MessageTooLarge
+                    | PluginError::Remote { .. } => StatusCode::BAD_GATEWAY,
                 };
                 (status, error.to_string())
             }
@@ -131,9 +147,9 @@ impl From<DatabaseError> for ApiError {
     }
 }
 
-impl From<InferenceError> for ApiError {
-    fn from(error: InferenceError) -> Self {
-        Self::Inference(error)
+impl From<PluginError> for ApiError {
+    fn from(error: PluginError) -> Self {
+        Self::Plugin(error)
     }
 }
 
@@ -156,6 +172,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let listener = tokio::net::TcpListener::bind(address).await?;
     println!("monet server listening on http://{address}");
+    app_log::write("server", &format!("listening on http://{address}"));
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
@@ -165,9 +182,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn create_router(database: Database, config: ConfigFile) -> Router {
     Router::new()
         .route("/health", get(health))
-        .route("/import", put(configure_import).get(get_import))
         .route("/import/run", post(run_import))
-        .route("/inference", get(get_inference))
+        .route("/import/logs", get(import_logs))
+        .route("/import/status", get(import_status))
+        .route("/import/restart", post(import_restart))
+        .route("/plugins", get(get_plugins))
         .route("/inference/status", get(inference_status))
         .route("/inference/models", get(inference_models))
         .route("/inference/model", put(update_inference_model))
@@ -201,9 +220,10 @@ fn create_router(database: Database, config: ConfigFile) -> Router {
         .layer(middleware::from_fn(performance_middleware))
         .with_state(AppState {
             database: Arc::new(Mutex::new(database)),
-            http: reqwest::Client::new(),
             inference: Arc::new(InferenceManager::default()),
+            importer: Arc::new(ImportManager::default()),
             config: Arc::new(config),
+            import_log: Arc::new(Mutex::new(ImportLog::default())),
         })
 }
 
@@ -228,34 +248,12 @@ async fn health() -> Json<Health> {
     Json(Health { healthy: true })
 }
 
-async fn configure_import(
-    State(state): State<AppState>,
-    Json(input): Json<ImportConfigInput>,
-) -> Result<Json<ImportConfig>, ApiError> {
-    let mut url = reqwest::Url::parse(&input.url)
-        .map_err(|error| DatabaseError::InvalidImportUrl(error.to_string()))?;
-    if !matches!(url.scheme(), "http" | "https") {
-        return Err(DatabaseError::InvalidImportUrl("URL must use HTTP or HTTPS".into()).into());
-    }
-    if !url.path().ends_with('/') {
-        let path = format!("{}/", url.path());
-        url.set_path(&path);
-    }
-    let mut database = state.database.lock().map_err(|_| DatabaseError::Poisoned)?;
-    Ok(Json(database.configure_import(url.to_string())?))
-}
-
-async fn get_import(State(state): State<AppState>) -> Result<Json<ImportConfig>, ApiError> {
-    let database = state.database.lock().map_err(|_| DatabaseError::Poisoned)?;
-    Ok(Json(database.get_import()?))
-}
-
-async fn get_inference(
-    State(state): State<AppState>,
-) -> Result<Json<InferenceConfigFile>, ApiError> {
-    Ok(Json(InferenceConfigFile {
+async fn get_plugins(State(state): State<AppState>) -> Result<Json<PluginsConfigFile>, ApiError> {
+    let config = state.config.load()?;
+    Ok(Json(PluginsConfigFile {
         path: state.config.path(),
-        inference: state.config.load()?.inference,
+        inference: config.inference,
+        import: config.import,
     }))
 }
 
@@ -264,12 +262,18 @@ fn require_inference_config(state: &AppState) -> Result<InferenceConfig, ApiErro
         .config
         .load()?
         .inference
-        .ok_or_else(|| InferenceError::NotConfigured.into())
+        .ok_or_else(|| PluginError::NotConfigured.into())
 }
 
-async fn inference_status(
-    State(state): State<AppState>,
-) -> Result<Json<InferenceStatus>, ApiError> {
+fn require_import_config(state: &AppState) -> Result<ImportPluginConfig, ApiError> {
+    state
+        .config
+        .load()?
+        .import
+        .ok_or_else(|| PluginError::NotConfigured.into())
+}
+
+async fn inference_status(State(state): State<AppState>) -> Result<Json<PluginStatus>, ApiError> {
     let config = require_inference_config(&state)?;
     Ok(Json(state.inference.status(config).await?))
 }
@@ -301,81 +305,458 @@ async fn inference_restart(State(state): State<AppState>) -> Json<Health> {
     Json(Health { healthy: true })
 }
 
+async fn import_status(State(state): State<AppState>) -> Result<Json<PluginStatus>, ApiError> {
+    let config = require_import_config(&state)?;
+    Ok(Json(state.importer.status(config).await?))
+}
+
+async fn import_restart(State(state): State<AppState>) -> Json<Health> {
+    state.importer.restart().await;
+    Json(Health { healthy: true })
+}
+
 async fn run_import(State(state): State<AppState>) -> Result<Json<ImportSummary>, ApiError> {
-    let config = {
-        let database = state.database.lock().map_err(|_| DatabaseError::Poisoned)?;
-        database.get_import()?
+    if let Ok(mut log) = state.import_log.lock() {
+        log.running = true;
+        log.lines.clear();
+        log.lines.push("Starting transaction sync".into());
+    }
+    app_log::write("sync", "Starting transaction sync");
+    let result = run_import_inner(&state).await;
+    let completion = match &result {
+        Ok(summary) => format!(
+            "Sync complete: {} accounts, {} transactions, {} categorized, {} pending removed",
+            summary.accounts, summary.transactions, summary.categorized, summary.deleted_pending
+        ),
+        Err(error) => format!("Sync failed: {error:?}"),
     };
-    let base = reqwest::Url::parse(&config.url)
-        .map_err(|error| DatabaseError::InvalidImportUrl(error.to_string()))?;
-    let accounts_url = base
-        .join("accounts")
-        .map_err(|error| DatabaseError::InvalidImportUrl(error.to_string()))?;
-    let imported_accounts: ImportedAccounts = fetch_json(&state.http, accounts_url).await?;
+    app_log::write("sync", &completion);
+    if let Ok(mut log) = state.import_log.lock() {
+        log.running = false;
+        log.lines.push(completion);
+    }
+    result.map(Json)
+}
+
+async fn import_logs(State(state): State<AppState>) -> Json<ImportLog> {
+    Json(
+        state
+            .import_log
+            .lock()
+            .map(|log| log.clone())
+            .unwrap_or_default(),
+    )
+}
+
+fn log_import(state: &AppState, message: impl Into<String>) {
+    let message = message.into();
+    app_log::write("sync", &message);
+    if let Ok(mut log) = state.import_log.lock() {
+        log.lines.push(message);
+    }
+}
+
+async fn run_import_inner(state: &AppState) -> Result<ImportSummary, ApiError> {
+    log_import(state, "Loading transaction import plugin configuration");
+    let config = require_import_config(&state)?;
+    log_import(state, "Requesting account snapshot from import plugin");
+    let imported_accounts = state.importer.accounts(config.clone()).await?;
+    log_import(
+        state,
+        format!(
+            "Received {} imported accounts",
+            imported_accounts.accounts.len()
+        ),
+    );
     let accounts = {
         let mut database = state.database.lock().map_err(|_| DatabaseError::Poisoned)?;
-        database.sync_accounts(&config, &imported_accounts.accounts)?
+        database.sync_accounts(&imported_accounts.accounts)?
     };
+    let new_account_ids = accounts
+        .iter()
+        .filter(|(_, initial)| *initial)
+        .map(|(account, _)| account.id.clone())
+        .collect::<Vec<_>>();
+    log_import(
+        state,
+        format!(
+            "Registered {} accounts ({} new)",
+            accounts.len(),
+            new_account_ids.len()
+        ),
+    );
 
     let mut summary = ImportSummary {
         accounts: accounts.len(),
         transactions: 0,
         deleted_pending: 0,
+        categorized: 0,
     };
-    for account in accounts {
-        let external_id = account
+    let mut new_source_ids = Vec::new();
+    for (account, initial) in accounts {
+        let account_id = account
             .external_id
             .as_deref()
             .ok_or_else(|| DatabaseError::AccountNotFound(account.id.clone()))?;
-        let mut url = base.clone();
-        {
-            let mut segments = url
-                .path_segments_mut()
-                .map_err(|_| DatabaseError::InvalidImportUrl(config.url.clone()))?;
-            segments.pop_if_empty();
-            segments.push("accounts");
-            segments.push(external_id);
-            segments.push("transactions");
-        }
-        let initial = {
-            let database = state.database.lock().map_err(|_| DatabaseError::Poisoned)?;
-            database.account_needs_initial_sync(&account.id)?
-        };
-        if initial {
-            url.query_pairs_mut().append_pair("initial", "true");
+        let start_date = if initial {
+            None
         } else {
-            let start_date = {
+            Some({
                 let database = state.database.lock().map_err(|_| DatabaseError::Poisoned)?;
                 database.account_sync_start_date(&account.id)?
-            };
-            url.query_pairs_mut().append_pair("start_date", &start_date);
-        }
-        let imported: ImportedTransactions = fetch_json(&state.http, url).await?;
-        let (transactions, deleted_pending) = {
+            })
+        };
+        log_import(
+            state,
+            if initial {
+                format!("{}: requesting initial transaction snapshot", account.name)
+            } else {
+                format!(
+                    "{}: requesting transactions from {}",
+                    account.name,
+                    start_date.as_deref().unwrap_or("derived date")
+                )
+            },
+        );
+        let imported = state
+            .importer
+            .transactions(
+                config.clone(),
+                ImportTransactionsInput {
+                    account_id: account_id.to_owned(),
+                    initial,
+                    start_date,
+                },
+            )
+            .await?;
+        let returned = imported.transactions.len();
+        let (transactions, deleted_pending, account_new_source_ids) = {
             let mut database = state.database.lock().map_err(|_| DatabaseError::Poisoned)?;
-            database.sync_transactions(&config, &account, imported)?
+            database.sync_transactions(&account, imported)?
         };
         summary.transactions += transactions;
         summary.deleted_pending += deleted_pending;
+        log_import(
+            state,
+            format!(
+                "{}: received {returned}, inserted {}, removed {} pending",
+                account.name,
+                account_new_source_ids.len(),
+                deleted_pending
+            ),
+        );
+        new_source_ids.extend(account_new_source_ids);
     }
-    Ok(Json(summary))
+    log_import(
+        state,
+        format!(
+            "Import complete; {} new sources need counterparts",
+            new_source_ids.len()
+        ),
+    );
+    summary.categorized = process_initial_import(&state, &new_source_ids, &new_account_ids).await?;
+    Ok(summary)
 }
 
-async fn fetch_json<T: serde::de::DeserializeOwned>(
-    client: &reqwest::Client,
-    url: reqwest::Url,
-) -> Result<T, ApiError> {
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|error| DatabaseError::ImportRequest(error.to_string()))?
-        .error_for_status()
-        .map_err(|error| DatabaseError::ImportRequest(error.to_string()))?;
-    response
-        .json()
-        .await
-        .map_err(|error| DatabaseError::ImportRequest(error.to_string()).into())
+async fn process_initial_import(
+    state: &AppState,
+    new_source_ids: &[String],
+    new_account_ids: &[String],
+) -> Result<usize, ApiError> {
+    let mut handled = 0;
+    if !new_source_ids.is_empty() {
+        let opening = {
+            let database = state.database.lock().map_err(|_| DatabaseError::Poisoned)?;
+            new_source_ids
+                .iter()
+                .map(|source_id| database.get_source(source_id))
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .filter(|bundle| bundle.source.transaction.opening_balance)
+                .collect::<Vec<_>>()
+        };
+        if !opening.is_empty() {
+            log_import(
+                state,
+                format!("Assigning {} opening balances to equity", opening.len()),
+            );
+            let mut database = state.database.lock().map_err(|_| DatabaseError::Poisoned)?;
+            if !database
+                .list_accounts()?
+                .iter()
+                .any(|account| account.id == OPENING_BALANCES_ACCOUNT_ID)
+            {
+                database.upsert_account(
+                    OPENING_BALANCES_ACCOUNT_ID,
+                    AccountInput {
+                        parent_id: None,
+                        name: "Opening Balances".into(),
+                        account_type: AccountType::Equity,
+                    },
+                )?;
+            }
+            for bundle in opening {
+                if assign_counterpart(
+                    &mut database,
+                    &bundle.source.id,
+                    OPENING_BALANCES_ACCOUNT_ID,
+                )? {
+                    handled += 1;
+                }
+            }
+        }
+    }
+
+    if new_account_ids.is_empty() {
+        log_import(state, "No new accounts; skipping initial transfer review");
+        return Ok(handled);
+    }
+    let inference = match state.config.load()?.inference {
+        Some(config) => config,
+        None => {
+            log_import(
+                state,
+                "Inference is not configured; skipping initial transfer review",
+            );
+            return Ok(handled);
+        }
+    };
+    let (accounts, pairs) = {
+        let database = state.database.lock().map_err(|_| DatabaseError::Poisoned)?;
+        let accounts = database
+            .list_accounts()?
+            .into_iter()
+            .filter(|account| {
+                matches!(
+                    account.account_type,
+                    AccountType::Asset | AccountType::Liability
+                )
+            })
+            .collect::<Vec<_>>();
+        (
+            accounts,
+            database.transfer_pairs_for_accounts(new_account_ids)?,
+        )
+    };
+    if pairs.is_empty() {
+        log_import(state, "Initial transfer review found no candidate pairs");
+        return Ok(handled);
+    }
+
+    let account_id_to_alias = accounts
+        .iter()
+        .enumerate()
+        .map(|(index, account)| (account.id.clone(), format!("a{index}")))
+        .collect::<HashMap<_, _>>();
+    let mut accounts_csv = vec![csv_row(&["account", "type", "parent", "name"])];
+    for account in &accounts {
+        accounts_csv.push(csv_row(&[
+            &account_id_to_alias[&account.id],
+            account.account_type.as_str(),
+            account
+                .parent_id
+                .as_ref()
+                .and_then(|id| account_id_to_alias.get(id))
+                .map(String::as_str)
+                .unwrap_or(""),
+            &account.name,
+        ]));
+    }
+    let mut candidates_csv = vec![csv_row(&[
+        "candidate",
+        "left_account",
+        "left_date",
+        "left_amount",
+        "left_payee",
+        "right_account",
+        "right_date",
+        "right_amount",
+        "right_payee",
+    ])];
+    for (index, (left, right)) in pairs.iter().enumerate() {
+        candidates_csv.push(csv_row(&[
+            &format!("p{index}"),
+            left.source
+                .transaction
+                .account_id
+                .as_ref()
+                .and_then(|id| account_id_to_alias.get(id))
+                .map(String::as_str)
+                .unwrap_or(""),
+            &left.source.transaction.date,
+            &decimal_amount(left.source.transaction.amount),
+            left.source.transaction.payee.as_deref().unwrap_or(""),
+            right
+                .source
+                .transaction
+                .account_id
+                .as_ref()
+                .and_then(|id| account_id_to_alias.get(id))
+                .map(String::as_str)
+                .unwrap_or(""),
+            &right.source.transaction.date,
+            &decimal_amount(right.source.transaction.amount),
+            right.source.transaction.payee.as_deref().unwrap_or(""),
+        ]));
+    }
+    log_import(
+        state,
+        format!(
+            "Initial transfer review: {} asset/liability accounts, {} candidate pairs",
+            accounts.len(),
+            pairs.len()
+        ),
+    );
+    let response = state
+        .inference
+        .generate(
+            inference,
+            InferenceGenerateInput {
+                model: None,
+                system: Some(
+                    "Review every candidate pair in the CSV. All pairs are assumed to be transfers unless you explicitly reject them. Return only candidate aliases that should NOT be reconciled as transfers. Reject coincidental opposite amounts, refunds, reversals, fees, or unrelated transactions."
+                        .into(),
+                ),
+                prompt: format!(
+                    "ASSET AND LIABILITY ACCOUNTS CSV\n{}\n\nPOSSIBLE TRANSFERS CSV\n{}",
+                    accounts_csv.join("\n"),
+                    candidates_csv.join("\n")
+                ),
+                output_schema: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "notTransfers": {
+                            "type": "array",
+                            "items": { "type": "string" }
+                        }
+                    },
+                    "required": ["notTransfers"],
+                    "additionalProperties": false
+                })),
+                timeout_ms: None,
+            },
+        )
+        .await;
+    let response = match response {
+        Ok(response) => response,
+        Err(error) => {
+            log_import(state, format!("Initial transfer review failed: {error}"));
+            return Ok(handled);
+        }
+    };
+    let review = match response
+        .structured
+        .and_then(|value| serde_json::from_value::<InitialTransferReview>(value).ok())
+    {
+        Some(review) => review,
+        None => {
+            log_import(
+                state,
+                "Initial transfer review returned invalid structured output",
+            );
+            return Ok(handled);
+        }
+    };
+    let rejected = review.not_transfers.into_iter().collect::<HashSet<_>>();
+    let mut used_sources = HashSet::new();
+    let mut database = state.database.lock().map_err(|_| DatabaseError::Poisoned)?;
+    for (index, (left, right)) in pairs.into_iter().enumerate() {
+        let alias = format!("p{index}");
+        if rejected.contains(&alias)
+            || used_sources.contains(&left.source.id)
+            || used_sources.contains(&right.source.id)
+        {
+            continue;
+        }
+        let (canonical, duplicate) = if left.source.id < right.source.id {
+            (left.source.id, right.source.id)
+        } else {
+            (right.source.id, left.source.id)
+        };
+        if database.reconcile_transfer(&canonical, &duplicate)? {
+            used_sources.insert(canonical.clone());
+            used_sources.insert(duplicate.clone());
+            handled += 2;
+            log_import(
+                state,
+                format!("Reconciled initial transfer {alias}: {canonical} / {duplicate}"),
+            );
+        }
+    }
+    log_import(
+        state,
+        format!(
+            "Initial transfer review complete: {} rejected, {} sources reconciled",
+            rejected.len(),
+            used_sources.len()
+        ),
+    );
+    Ok(handled)
+}
+
+fn csv_row(fields: &[&str]) -> String {
+    fields
+        .iter()
+        .map(|value| {
+            if value
+                .chars()
+                .any(|character| matches!(character, ',' | '"' | '\n' | '\r'))
+            {
+                format!("\"{}\"", value.replace('"', "\"\""))
+            } else {
+                (*value).to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn decimal_amount(cents: i64) -> String {
+    let cents = i128::from(cents);
+    let sign = if cents < 0 { "-" } else { "" };
+    let absolute = cents.abs();
+    format!("{sign}{}.{:02}", absolute / 100, absolute % 100)
+}
+
+fn assign_counterpart(
+    database: &mut Database,
+    source_id: &str,
+    account_id: &str,
+) -> Result<bool, DatabaseError> {
+    let bundle = database.get_source(source_id)?;
+    if bundle.projection.postings.len() != 1 || bundle.projection.unallocated_amount == 0 {
+        return Ok(false);
+    }
+    if bundle.source.transaction.account_id.as_deref() == Some(account_id) {
+        return Ok(false);
+    }
+    if !database
+        .list_accounts()?
+        .iter()
+        .any(|account| account.id == account_id)
+    {
+        return Ok(false);
+    }
+    let posting_id = uuid::Uuid::now_v7().to_string();
+    database.append_changes(
+        source_id,
+        vec![
+            Change::Split {
+                target_id: posting_id.clone(),
+            },
+            Change::Set {
+                target_id: posting_id.clone(),
+                field: "account_id".into(),
+                value: json!(account_id),
+            },
+            Change::Set {
+                target_id: posting_id,
+                field: "amount".into(),
+                value: json!(bundle.projection.unallocated_amount),
+            },
+        ],
+    )?;
+    Ok(true)
 }
 
 async fn upsert_account(
@@ -541,16 +922,11 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
-
     use axum::{
         body::Body,
-        extract::Query,
         http::{Method, Request},
-        routing::get,
     };
     use http_body_util::BodyExt;
-    use serde::Deserialize;
     use serde_json::{Value, json};
     use tower::ServiceExt;
 
@@ -570,20 +946,6 @@ mod tests {
     const THIRD_SOURCE_ID: &str = "019bf123-0000-7000-8000-000000000020";
     const GROCERIES_POSTING_ID: &str = "019bf123-0000-7000-8000-000000000002";
     const HOUSEHOLD_POSTING_ID: &str = "019bf123-0000-7000-8000-000000000003";
-
-    #[derive(Clone)]
-    struct FakeImportState {
-        account_requests: Arc<Mutex<usize>>,
-        start_dates: Arc<Mutex<Vec<Option<String>>>>,
-        initial_requests: Arc<Mutex<Vec<bool>>>,
-    }
-
-    #[derive(Deserialize)]
-    struct ImportQuery {
-        start_date: Option<String>,
-        #[serde(default)]
-        initial: bool,
-    }
 
     fn test_app() -> Router {
         let path =
@@ -1405,232 +1767,5 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(body["changes"].as_array().unwrap().is_empty());
         assert_eq!(body["postings"].as_array().unwrap().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn importer_syncs_accounts_cursors_pending_and_postings() {
-        async fn accounts(State(state): State<FakeImportState>) -> Json<Value> {
-            let mut requests = state.account_requests.lock().unwrap();
-            *requests += 1;
-            let mut accounts = vec![
-                json!({ "id": "expenses", "parent_id": null, "name": "Expenses", "type": "expense" }),
-                json!({ "id": "groceries", "parent_id": "expenses", "name": "Groceries", "type": "expense" }),
-            ];
-            if *requests <= 2 {
-                let name = if *requests == 1 {
-                    "Checking"
-                } else {
-                    "Checking from Origin"
-                };
-                accounts.insert(
-                    0,
-                    json!({ "id": "bank", "parent_id": null, "name": name, "type": "asset" }),
-                );
-            }
-            Json(json!({ "accounts": accounts }))
-        }
-
-        async fn transactions(
-            State(state): State<FakeImportState>,
-            AxumPath(account_id): AxumPath<String>,
-            Query(query): Query<ImportQuery>,
-        ) -> Json<Value> {
-            if account_id != "bank" {
-                return Json(json!({
-                    "transactions": [],
-                    "pending_ids": [],
-                    "latest": null
-                }));
-            }
-            state.initial_requests.lock().unwrap().push(query.initial);
-            let mut requests = state.start_dates.lock().unwrap();
-            requests.push(query.start_date.clone());
-            if requests.len() == 1 {
-                return Json(json!({
-                    "transactions": [
-                        {
-                            "id": "tx-1",
-                            "date": "2026-07-19",
-                            "payee": "Target",
-                            "amount": -10000,
-                            "category": "Shopping",
-                            "pending": false,
-                            "notes": null,
-                            "raw": {}
-                        },
-                        {
-                            "id": "tx-pending",
-                            "date": "2026-07-20",
-                            "payee": "Coffee",
-                            "amount": -500,
-                            "category": null,
-                            "pending": true,
-                            "notes": null,
-                            "raw": {}
-                        }
-                    ],
-                    "pending_ids": ["tx-pending"],
-                    "latest": "tx-1"
-                }));
-            }
-            Json(json!({
-                "transactions": [{
-                    "id": "tx-2",
-                    "date": "2026-07-21",
-                    "payee": "Payroll",
-                    "amount": 300000,
-                    "category": "Salary",
-                    "pending": false,
-                    "notes": null,
-                    "raw": {}
-                }],
-                "pending_ids": [],
-                "latest": "tx-2"
-            }))
-        }
-
-        let fake_state = FakeImportState {
-            account_requests: Arc::new(Mutex::new(0)),
-            start_dates: Arc::new(Mutex::new(Vec::new())),
-            initial_requests: Arc::new(Mutex::new(Vec::new())),
-        };
-        let fake_app = Router::new()
-            .route("/accounts", get(accounts))
-            .route("/accounts/{account_id}/transactions", get(transactions))
-            .with_state(fake_state.clone());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move { axum::serve(listener, fake_app).await.unwrap() });
-
-        let app = test_app();
-        let (status, _) = request(
-            &app,
-            Method::PUT,
-            "/import",
-            Some(json!({ "url": format!("http://{address}") })),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-
-        let (status, first) = request(&app, Method::POST, "/import/run", None).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(first["accounts"], 3);
-        assert_eq!(first["transactions"], 2);
-        assert_eq!(first["deleted_pending"], 0);
-
-        let (status, accounts) = request(&app, Method::GET, "/accounts", None).await;
-        assert_eq!(status, StatusCode::OK);
-        let checking = accounts
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|account| account["external_id"] == "bank")
-            .unwrap();
-        let checking_id = checking["id"].as_str().unwrap();
-        assert_eq!(checking["name"], "Checking");
-        assert_eq!(checking["imported_name"], "Checking");
-        assert_eq!(checking["latest_external_transaction_id"], "tx-1");
-
-        let edited = put_account(&app, checking_id, None, "Everyday checking", "asset").await;
-        assert_eq!(edited["name"], "Everyday checking");
-        assert_eq!(edited["imported_name"], "Checking");
-
-        put_account(&app, CASH_ID, None, "Cash", "asset").await;
-        let (status, _) = request(
-            &app,
-            Method::PUT,
-            &format!("/accounts/{checking_id}"),
-            Some(json!({
-                "parent_id": CASH_ID,
-                "name": "Everyday checking",
-                "type": "asset"
-            })),
-        )
-        .await;
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-
-        let (status, _) = request(
-            &app,
-            Method::DELETE,
-            &format!("/accounts/{checking_id}"),
-            None,
-        )
-        .await;
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-
-        let (status, second) = request(&app, Method::POST, "/import/run", None).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(second["transactions"], 1);
-        assert_eq!(second["deleted_pending"], 1);
-
-        let (status, accounts) = request(&app, Method::GET, "/accounts", None).await;
-        assert_eq!(status, StatusCode::OK);
-        let checking = accounts
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|account| account["external_id"] == "bank")
-            .unwrap();
-        assert_eq!(checking["name"], "Everyday checking");
-        assert_eq!(checking["imported_name"], "Checking from Origin");
-
-        let (status, entries) = request(
-            &app,
-            Method::GET,
-            &format!("/accounts/{checking_id}/transactions?limit=1"),
-            None,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(entries["transactions"].as_array().unwrap().len(), 1);
-        let next = &entries["next"];
-        let (status, next_entries) = request(
-            &app,
-            Method::GET,
-            &format!(
-                "/accounts/{checking_id}/transactions?limit=1&before_date={}&before_source_id={}",
-                next["date"].as_str().unwrap(),
-                next["source_id"].as_str().unwrap()
-            ),
-            None,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(next_entries["transactions"].as_array().unwrap().len(), 1);
-        assert_eq!(next_entries["next"], Value::Null);
-        let surviving_source_id = next_entries["transactions"][0]["source_id"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        assert_eq!(
-            fake_state.start_dates.lock().unwrap().as_slice(),
-            &[None, Some("2026-07-12".into())]
-        );
-        assert_eq!(
-            fake_state.initial_requests.lock().unwrap().as_slice(),
-            &[true, false]
-        );
-
-        let (status, third) = request(&app, Method::POST, "/import/run", None).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(third["accounts"], 2);
-        let (status, _) = request(
-            &app,
-            Method::GET,
-            &format!("/sources/{surviving_source_id}"),
-            None,
-        )
-        .await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-        let (status, accounts) = request(&app, Method::GET, "/accounts", None).await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(
-            accounts
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|account| account["external_id"] != "bank")
-        );
-        server.abort();
     }
 }

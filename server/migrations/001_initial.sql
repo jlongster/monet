@@ -2,20 +2,13 @@ PRAGMA foreign_keys = ON;
 PRAGMA journal_mode = WAL;
 PRAGMA busy_timeout = 5000;
 
-CREATE TABLE IF NOT EXISTS import_config (
-    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-    id TEXT NOT NULL,
-    url TEXT NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS accounts (
     id TEXT PRIMARY KEY,
     parent_id TEXT REFERENCES accounts(id),
     external_id TEXT UNIQUE,
     name TEXT NOT NULL,
     imported_name TEXT,
-    type TEXT NOT NULL CHECK (type IN ('asset', 'liability', 'income', 'expense', 'equity')),
-    latest_external_transaction_id TEXT
+    type TEXT NOT NULL CHECK (type IN ('asset', 'liability', 'income', 'expense', 'equity'))
 );
 
 CREATE INDEX IF NOT EXISTS accounts_parent_id
@@ -35,6 +28,7 @@ CREATE TABLE IF NOT EXISTS transactions_source (
     opening_balance INTEGER NOT NULL DEFAULT 0 CHECK (opening_balance IN (0, 1)),
     notes TEXT,
     raw_json TEXT NOT NULL,
+    duplicate_of TEXT REFERENCES transactions_source(id) ON DELETE CASCADE,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (source, external_account_id, external_transaction_id)
 );

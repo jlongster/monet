@@ -42,13 +42,14 @@ import {
   setNewAccountType,
   stateAtom,
   sync,
+  syncLogAtom,
   toggleFocus,
   transactionSearchAtom,
 } from "./store"
 import { FilterSelect, type FilterSelectOption } from "./filter-select"
 import { moveOrderedFocus } from "./focus-order"
 import { FormButton, FormField } from "./form"
-import { InferenceSettings } from "./inference-settings"
+import { PluginsSettings } from "./plugins-settings"
 import { PopoverProvider } from "./popover"
 import { scrollTopForRange } from "./selection-scroll"
 import { gray, selectionBackground } from "./theme"
@@ -202,6 +203,7 @@ export function App() {
   const financialAccounts = useAtomValue(financialAccountsAtom)
   const accountView = useAtomValue(accountViewAtom)
   const transactionSearch = useAtomValue(transactionSearchAtom)
+  const syncLog = useAtomValue(syncLogAtom)
   const financialAccountLayoutKey = financialAccounts.map((account) => account.id).join("\0")
   const collapsedAccountIds = useAtomValue(collapsedAccountIdsAtom)
   const selectedTransaction = useAtomValue(selectedTransactionAtom)
@@ -211,7 +213,7 @@ export function App() {
   const [openCreationSelect, setOpenCreationSelect] = useState<"parent" | "type" | null>(null)
   const [deletingAccount, setDeletingAccount] = useState<Account | null>(null)
   const [deletionChoice, setDeletionChoice] = useState<0 | 1>(0)
-  const [screen, setScreen] = useState<"ledger" | "inference">("ledger")
+  const [screen, setScreen] = useState<"ledger" | "plugins">("ledger")
   const [transactionDraft, setTransactionDraft] = useState<TransactionDraft | null>(null)
   const [transactionEditorOpen, setTransactionEditorOpen] = useState(false)
   const [transactionEditing, setTransactionEditing] = useState(false)
@@ -227,6 +229,8 @@ export function App() {
   const [transactionEditorError, setTransactionEditorError] = useState<string | null>(null)
   const [searchDraft, setSearchDraft] = useState(transactionSearch)
   const [searchFocused, setSearchFocused] = useState(false)
+  const [syncLogOpen, setSyncLogOpen] = useState(false)
+  const syncLogRef = useRef<ScrollBoxRenderable>(null)
   const [notesHeight, setNotesHeight] = useState(3)
   const notesMeasureCallback = useRef<(() => void) | null>(null)
   const showAccountSidebar = terminalWidth >= ACCOUNT_SIDEBAR_WIDTH +
@@ -647,7 +651,7 @@ export function App() {
   }, [registry, showAccountSidebar, state.focus])
 
   useEffect(() => {
-    if (deletingAccount || state.creatingAccount || state.assigning || transactionEditing || transactionDraft) {
+    if (syncLogOpen || deletingAccount || state.creatingAccount || state.assigning || transactionEditing || transactionDraft) {
       accountListRef.current?.blur()
       transactionListRef.current?.blur()
       return
@@ -668,10 +672,16 @@ export function App() {
     state.assigning,
     state.creatingAccount,
     state.focus,
+    syncLogOpen,
     transactionDraft,
     transactionEditing,
     transactionEditorOpen,
   ])
+
+  useEffect(() => {
+    if (!syncLogOpen) return
+    syncLogRef.current?.scrollTo(Math.max(0, syncLog.lines.length - 1))
+  }, [syncLog.lines.length, syncLogOpen])
 
   useEffect(() => {
     if (!state.trace) return
@@ -749,7 +759,13 @@ export function App() {
   useKeyboard((key) => {
     const tabPressed = key.name === "tab" || key.name === "shift-tab"
     const reverseTab = key.shift || key.name === "shift-tab"
-    if (screen === "inference") return
+    if (syncLogOpen) {
+      if (key.name === "escape" || key.name === "return" || key.name === "enter") {
+        setSyncLogOpen(false)
+      }
+      return
+    }
+    if (screen === "plugins") return
     if (searchFocused) {
       if (key.name === "escape" || key.name === "return" || key.name === "enter") {
         setSearchFocused(false)
@@ -1054,31 +1070,35 @@ export function App() {
             )
           })}
           <box
-            id="screen-inference"
+            id="screen-plugins"
             style={{
               height: 1,
               paddingLeft: 1,
               paddingRight: 1,
-              backgroundColor: screen === "inference" ? selectionBackground : gray[800],
+              backgroundColor: screen === "plugins" ? selectionBackground : gray[800],
             }}
-            onMouseDown={transactionEditing || transactionDraft ? undefined : () => setScreen("inference")}
+            onMouseDown={transactionEditing || transactionDraft ? undefined : () => setScreen("plugins")}
           >
-            <text fg={screen === "inference" ? gray[100] : gray[500]}>Inference</text>
+            <text fg={screen === "plugins" ? gray[100] : gray[500]}>Plugins</text>
           </box>
         </box>
         <box style={{ flexDirection: "row", gap: 2 }}>
-          <text fg={state.error ? gray[300] : state.busy ? gray[400] : gray[500]}>
+          <text
+            id="sync-status"
+            fg={state.error ? gray[300] : state.busy ? gray[400] : gray[500]}
+            onMouseDown={syncLog.lines.length > 0 ? () => setSyncLogOpen(true) : undefined}
+          >
             {state.error ?? state.message}
           </text>
-          <text id="sync-all" fg={gray[200]} onMouseDown={transactionEditing || transactionDraft ? undefined : () => sync(registry)}>
+          <text id="sync-all" fg={state.busy ? gray[600] : gray[200]} onMouseDown={transactionEditing || transactionDraft || state.busy ? undefined : () => sync(registry)}>
             [s] sync
           </text>
         </box>
       </box>
 
       <box style={{ flexGrow: 1, flexDirection: "row-reverse" }}>
-        {screen === "inference" ? (
-          <InferenceSettings />
+        {screen === "plugins" ? (
+          <PluginsSettings />
         ) : (
         <>
         {transactionEditorOpen ? (
@@ -1860,6 +1880,59 @@ export function App() {
         )}
       </box>
 
+      {syncLogOpen ? (
+        <box
+          style={{
+            position: "absolute",
+            top: 1,
+            left: 0,
+            width: "100%",
+            height: "100%",
+            zIndex: 2000,
+            alignItems: "center",
+            justifyContent: "center",
+            backgroundColor: gray[900],
+          }}
+        >
+          <box
+            title=" Transaction sync "
+            style={{
+              width: "80%",
+              maxWidth: 90,
+              height: "75%",
+              border: true,
+              borderColor: gray[600],
+              backgroundColor: gray[900],
+              flexDirection: "column",
+              paddingLeft: 1,
+              paddingRight: 1,
+            }}
+          >
+            <text fg={syncLog.running ? gray[200] : gray[400]}>
+              <strong>{syncLog.running ? "Syncing" : "Sync complete"}</strong>
+            </text>
+            <box style={{ height: 1 }} />
+            <scrollbox
+              ref={syncLogRef}
+              scrollX={false}
+              scrollY
+              style={{
+                flexGrow: 1,
+                flexDirection: "column",
+                verticalScrollbarOptions: { visible: true },
+              }}
+            >
+              {syncLog.lines.map((line, index) => (
+                <text key={index} fg={line.startsWith("Sync failed") ? gray[300] : gray[400]} wrapMode="word">
+                  {line}
+                </text>
+              ))}
+            </scrollbox>
+            <text fg={gray[600]}>esc/enter close</text>
+          </box>
+        </box>
+      ) : null}
+
       <box
         style={{
           height: 1,
@@ -1870,15 +1943,15 @@ export function App() {
         }}
       >
         <text fg={gray[600]}>
-          {screen === "inference"
-            ? "inference settings"
+          {screen === "plugins"
+            ? "plugin settings"
             : transactionEditing
               ? "transaction editor   tab field   esc read-only"
             : transactionEditorOpen
               ? "tab field   ↑/↓ move transactions when register is focused   esc close"
               : `${showAccountSidebar ? "tab pane   " : ""}↑/↓ move   a new   e edit   ${showAccountSidebar ? "d delete   " : ""}p/n page`}
         </text>
-        <text fg={gray[600]}>{screen === "inference" || transactionEditorOpen ? "" : "r refresh   s sync   q quit"}</text>
+        <text fg={gray[600]}>{screen === "plugins" || transactionEditorOpen ? "" : "r refresh   s sync   q quit"}</text>
       </box>
     </box>
     </PopoverProvider>

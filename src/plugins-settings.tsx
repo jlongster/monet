@@ -7,19 +7,21 @@ import { moveOrderedFocus } from "./focus-order"
 import { FormButton } from "./form"
 import {
   inferenceAtom,
+  loadImportPlugin,
   loadInference,
+  restartImportPlugin,
   restartInference,
   saveInferenceModel,
   testInference,
 } from "./store"
 import { gray } from "./theme"
 
-type Field = "model" | "restart" | "test"
+type Field = "model" | "restart" | "test" | "importRestart"
 
-const fields: Field[] = ["model", "restart", "test"]
+const fields: Field[] = ["model", "restart", "test", "importRestart"]
 const testPrompt = "Reply with exactly: Monet inference is ready."
 
-export function InferenceSettings() {
+export function PluginsSettings() {
   const registry = useContext(RegistryContext)
   const state = useAtomValue(inferenceAtom)
   const [field, setField] = useState<Field>("model")
@@ -28,6 +30,7 @@ export function InferenceSettings() {
 
   useEffect(() => {
     loadInference(registry)
+    loadImportPlugin(registry)
   }, [registry])
 
   useEffect(() => {
@@ -47,6 +50,7 @@ export function InferenceSettings() {
     if (key.name !== "return" && key.name !== "enter") return
     if (field === "test") testInference(registry, testPrompt, model)
     if (field === "restart") restartInference(registry)
+    if (field === "importRestart") restartImportPlugin(registry)
   })
 
   const modelOptions: FilterSelectOption<string>[] = state.models.map((item) => ({
@@ -59,6 +63,9 @@ export function InferenceSettings() {
   const pluginDescription = state.status?.plugin
     ? `Using plugin: ${state.status.plugin.name}${state.status.detail ? ` (${state.status.detail})` : ""}`
     : `Using plugin: ${state.error ?? state.message}`
+  const importPluginDescription = state.importStatus?.plugin
+    ? `Using plugin: ${state.importStatus.plugin.name}${state.importStatus.detail ? ` (${state.importStatus.detail})` : ""}`
+    : `Using plugin: ${state.importError ?? state.importMessage}`
 
   return (
     <box style={{ width: "100%", height: "100%", flexDirection: "column", padding: 1 }}>
@@ -72,6 +79,8 @@ export function InferenceSettings() {
         }}
       >
         <text fg={gray[500]} style={{ marginLeft: 1 }}>{`Config: ${state.configPath ?? "loading"}`}</text>
+
+        <text fg={gray[100]} style={{ marginLeft: 1 }}><strong>Inference</strong></text>
 
         <box style={{ width: "100%", height: 2, flexDirection: "row", zIndex: openSelect ? 100 : 0 }}>
           <text fg={field === "model" ? gray[200] : gray[700]} style={{ width: 1, height: 2 }}>
@@ -116,6 +125,25 @@ export function InferenceSettings() {
             </box>
           ) : null}
         </box>
+
+        <box style={{ marginLeft: 1, flexDirection: "column" }}>
+          <text fg={gray[100]}><strong>Transaction import</strong></text>
+        </box>
+        <box style={{ marginLeft: 1, height: 2, flexDirection: "column" }}>
+          <text fg={gray[100]}><strong>Plugin</strong></text>
+          <text
+            fg={state.importError ? gray[300] : state.importStatus?.ready ? gray[300] : gray[500]}
+            wrapMode="word"
+          >
+            {importPluginDescription}
+          </text>
+        </box>
+        <FormButton
+          label="Restart plugin"
+          focused={field === "importRestart"}
+          disabled={state.importBusy}
+          onPress={() => restartImportPlugin(registry)}
+        />
       </box>
     </box>
   )
