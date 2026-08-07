@@ -1,0 +1,400 @@
+{
+  "version": 1,
+  "name": "ambiguous-takeover",
+  "command": "'cargo' 'run' '--manifest-path' 'server/Cargo.toml' '--bin' 'categorization_eval' '--' '--interactive' '--payee' 'Amazon' '--source-type' 'mixed' '--date-profile' 'mixed' '--steps' '20' '--seed' '40'",
+  "accounts": [
+    {
+      "id": "dining",
+      "name": "Expenses: Dining",
+      "accountType": "expense"
+    },
+    {
+      "id": "groceries",
+      "name": "Expenses: Groceries",
+      "accountType": "expense"
+    },
+    {
+      "id": "shopping",
+      "name": "Expenses: Shopping",
+      "accountType": "expense"
+    },
+    {
+      "id": "household",
+      "name": "Expenses: Household",
+      "accountType": "expense"
+    },
+    {
+      "id": "utilities",
+      "name": "Expenses: Utilities",
+      "accountType": "expense"
+    },
+    {
+      "id": "salary",
+      "name": "Income: Salary",
+      "accountType": "income"
+    }
+  ],
+  "startingHistory": [],
+  "steps": [
+    {
+      "step": 1,
+      "query": {
+        "payee": "Amazon",
+        "importedCategory": null,
+        "date": "2025-01-01",
+        "amount": -1762,
+        "sourceAccountType": "liability",
+        "sourceAccountId": "loan"
+      },
+      "suggestedCategory": null,
+      "decision": {
+        "action": "categorized",
+        "input": "life",
+        "accountId": "life",
+        "createdAccount": true
+      }
+    },
+    {
+      "step": 2,
+      "query": {
+        "payee": "Amazon",
+        "importedCategory": null,
+        "date": "2025-01-13",
+        "amount": -5439,
+        "sourceAccountType": "liability",
+        "sourceAccountId": "loan"
+      },
+      "suggestedCategory": "life",
+      "decision": {
+        "action": "categorized",
+        "input": "food",
+        "accountId": "food",
+        "createdAccount": true
+      }
+    },
+    {
+      "step": 3,
+      "query": {
+        "payee": "Amazon",
+        "importedCategory": null,
+        "date": "2025-02-10",
+        "amount": -9564,
+        "sourceAccountType": "asset",
+        "sourceAccountId": "savings"
+      },
+      "suggestedCategory": null,
+      "decision": {
+        "action": "no_suggestion",
+        "input": "",
+        "accountId": null,
+        "createdAccount": false
+      }
+    },
+    {
+      "step": 4,
+      "query": {
+        "payee": "Amazon",
+        "importedCategory": null,
+        "date": "2025-02-25",
+        "amount": -9021,
+        "sourceAccountType": "liability",
+        "sourceAccountId": "loan"
+      },
+      "suggestedCategory": null,
+      "decision": {
+        "action": "no_suggestion",
+        "input": "",
+        "accountId": null,
+        "createdAccount": false
+      }
+    },
+    {
+      "step": 5,
+      "query": {
+        "payee": "Amazon",
+        "importedCategory": null,
+        "date": "2025-03-11",
+        "amount": -9530,
+        "sourceAccountType": "asset",
+        "sourceAccountId": "checking"
+      },
+      "suggestedCategory": null,
+      "decision": {
+        "action": "categorized",
+        "input": "kids",
+        "accountId": "kids",
+        "createdAccount": true
+      }
+    },
+    {
+      "step": 6,
+      "query": {
+        "payee": "Amazon",
+        "importedCategory": null,
+        "date": "2025-04-07",
+        "amount": -7861,
+        "sourceAccountType": "asset",
+        "sourceAccountId": "savings"
+      },
+      "suggestedCategory": null,
+      "decision": {
+        "action": "categorized",
+        "input": "life",
+        "accountId": "life",
+        "createdAccount": false
+      }
+    },
+    {
+      "step": 7,
+      "query": {
+        "payee": "Amazon",
+        "importedCategory": null,
+        "date": "2025-04-14",
+        "amount": -8828,
+        "sourceAccountType": "asset",
+        "sourceAccountId": "checking"
+      },
+      "suggestedCategory": null,
+      "decision": {
+        "action": "no_suggestion",
+        "input": "",
+        "accountId": null,
+        "createdAccount": false
+      }
+    },
+    {
+      "step": 8,
+      "query": {
+        "payee": "Amazon",
+        "importedCategory": null,
+        "date": "2025-04-21",
+        "amount": -7752,
+        "sourceAccountType": "asset",
+        "sourceAccountId": "checking"
+      },
+      "suggestedCategory": null,
+      "decision": {
+        "action": "categorized",
+        "input": "life",
+        "accountId": "life",
+        "createdAccount": false
+      }
+    },
+    {
+      "step": 9,
+      "query": {
+        "payee": "Amazon",
+        "importedCategory": null,
+        "date": "2025-05-19",
+        "amount": -5363,
+        "sourceAccountType": "asset",
+        "sourceAccountId": "checking"
+      },
+      "suggestedCategory": "life",
+      "decision": {
+        "action": "categorized",
+        "input": "",
+        "accountId": "life",
+        "createdAccount": false
+      }
+    },
+    {
+      "step": 10,
+      "query": {
+        "payee": "Amazon",
+        "importedCategory": null,
+        "date": "2025-06-08",
+        "amount": -6378,
+        "sourceAccountType": "asset",
+        "sourceAccountId": "savings"
+      },
+      "suggestedCategory": "life",
+      "decision": {
+        "action": "categorized",
+        "input": "",
+        "accountId": "life",
+        "createdAccount": false
+      }
+    },
+    {
+      "step": 11,
+      "query": {
+        "payee": "Amazon",
+        "importedCategory": null,
+        "date": "2025-06-25",
+        "amount": -3466,
+        "sourceAccountType": "liability",
+        "sourceAccountId": "credit-card"
+      },
+      "suggestedCategory": "life",
+      "decision": {
+        "action": "categorized",
+        "input": "",
+        "accountId": "life",
+        "createdAccount": false
+      }
+    },
+    {
+      "step": 12,
+      "query": {
+        "payee": "Amazon",
+        "importedCategory": null,
+        "date": "2025-07-13",
+        "amount": -1030,
+        "sourceAccountType": "asset",
+        "sourceAccountId": "checking"
+      },
+      "suggestedCategory": "life",
+      "decision": {
+        "action": "categorized",
+        "input": "food",
+        "accountId": "food",
+        "createdAccount": false
+      }
+    },
+    {
+      "step": 13,
+      "query": {
+        "payee": "Amazon",
+        "importedCategory": null,
+        "date": "2025-07-25",
+        "amount": -4702,
+        "sourceAccountType": "asset",
+        "sourceAccountId": "checking"
+      },
+      "suggestedCategory": "life",
+      "decision": {
+        "action": "categorized",
+        "input": "food",
+        "accountId": "food",
+        "createdAccount": false
+      }
+    },
+    {
+      "step": 14,
+      "query": {
+        "payee": "Amazon",
+        "importedCategory": null,
+        "date": "2025-08-19",
+        "amount": -9731,
+        "sourceAccountType": "asset",
+        "sourceAccountId": "checking"
+      },
+      "suggestedCategory": null,
+      "decision": {
+        "action": "categorized",
+        "input": "food",
+        "accountId": "food",
+        "createdAccount": false
+      }
+    },
+    {
+      "step": 15,
+      "query": {
+        "payee": "Amazon",
+        "importedCategory": null,
+        "date": "2025-08-28",
+        "amount": -8748,
+        "sourceAccountType": "asset",
+        "sourceAccountId": "savings"
+      },
+      "suggestedCategory": "food",
+      "decision": {
+        "action": "categorized",
+        "input": "",
+        "accountId": "food",
+        "createdAccount": false
+      }
+    },
+    {
+      "step": 16,
+      "query": {
+        "payee": "Amazon",
+        "importedCategory": null,
+        "date": "2025-09-17",
+        "amount": -8838,
+        "sourceAccountType": "asset",
+        "sourceAccountId": "savings"
+      },
+      "suggestedCategory": "food",
+      "decision": {
+        "action": "categorized",
+        "input": "",
+        "accountId": "food",
+        "createdAccount": false
+      }
+    },
+    {
+      "step": 17,
+      "query": {
+        "payee": "Amazon",
+        "importedCategory": null,
+        "date": "2025-10-12",
+        "amount": -1106,
+        "sourceAccountType": "liability",
+        "sourceAccountId": "credit-card"
+      },
+      "suggestedCategory": "food",
+      "decision": {
+        "action": "categorized",
+        "input": "",
+        "accountId": "food",
+        "createdAccount": false
+      }
+    },
+    {
+      "step": 18,
+      "query": {
+        "payee": "Amazon",
+        "importedCategory": null,
+        "date": "2025-10-26",
+        "amount": -2563,
+        "sourceAccountType": "liability",
+        "sourceAccountId": "loan"
+      },
+      "suggestedCategory": "food",
+      "decision": {
+        "action": "categorized",
+        "input": "",
+        "accountId": "food",
+        "createdAccount": false
+      }
+    },
+    {
+      "step": 19,
+      "query": {
+        "payee": "Amazon",
+        "importedCategory": null,
+        "date": "2025-11-07",
+        "amount": -3332,
+        "sourceAccountType": "liability",
+        "sourceAccountId": "loan"
+      },
+      "suggestedCategory": "food",
+      "decision": {
+        "action": "categorized",
+        "input": "",
+        "accountId": "food",
+        "createdAccount": false
+      }
+    },
+    {
+      "step": 20,
+      "query": {
+        "payee": "Amazon",
+        "importedCategory": null,
+        "date": "2025-11-16",
+        "amount": -7803,
+        "sourceAccountType": "liability",
+        "sourceAccountId": "credit-card"
+      },
+      "suggestedCategory": "food",
+      "decision": {
+        "action": "categorized",
+        "input": "",
+        "accountId": "food",
+        "createdAccount": false
+      }
+    }
+  ]
+}

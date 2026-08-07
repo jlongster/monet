@@ -32,24 +32,14 @@ pub struct PayeeFixtures {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GeneratedPayee {
-    pub imported_payee: String,
-    pub canonical_payee: String,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct PayeeCandidate {
+    pub imported_payee: String,
     pub resolved_payee: String,
+    pub comparison_form: String,
     pub score: f64,
-    pub character_score: f64,
-    pub tfidf_score: f64,
-    pub token_score: f64,
-    pub neighbor_count: usize,
-    pub neighbor_vote: f64,
-    pub neighbor_agreement: f64,
-    pub aliases: Vec<String>,
-    pub examples: usize,
+    pub position: usize,
+    pub eligible: bool,
+    pub selected: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -57,21 +47,22 @@ pub struct PayeeCandidate {
 pub struct PayeeResolution {
     pub imported_payee: String,
     pub resolved_payee: Option<String>,
+    pub potential_payee: Option<String>,
     pub method: ResolutionMethod,
-    pub score: f64,
-    pub margin: f64,
-    pub effective_support: f64,
-    pub neighbor_agreement: f64,
+    pub best_score: f64,
+    pub runner_up_score: Option<f64>,
+    pub minimum_score: f64,
+    pub minimum_group_margin: f64,
     pub reason: String,
+    pub selected_position: Option<usize>,
     pub candidates: Vec<PayeeCandidate>,
-    pub neighbors: Vec<PayeeNeighbor>,
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum ResolutionMethod {
-    Exact,
-    Fuzzy,
+    ExactLatest,
+    FuzzyBest,
     Unresolved,
 }
 
@@ -79,37 +70,19 @@ pub enum ResolutionMethod {
 pub struct PayeeResolverOptions {
     pub minimum_score: f64,
     pub minimum_supported_score: f64,
+    pub minimum_group_margin: f64,
     pub ngram_minimum: usize,
     pub ngram_maximum: usize,
-    pub nearest_neighbors: usize,
-    pub neighbor_similarity_floor: f64,
-    pub recency_half_life: f64,
-    pub minimum_neighbors: usize,
-    pub minimum_neighbor_agreement: f64,
-    pub minimum_effective_support: f64,
-    pub minimum_vote_margin: f64,
-    pub near_exact_score: f64,
-    pub strong_support: f64,
-    pub strong_neighbor_count: usize,
 }
 
 impl Default for PayeeResolverOptions {
     fn default() -> Self {
         Self {
-            minimum_score: 0.68,
+            minimum_score: 0.90,
             minimum_supported_score: 0.50,
+            minimum_group_margin: 0.05,
             ngram_minimum: 3,
             ngram_maximum: 5,
-            nearest_neighbors: 5,
-            neighbor_similarity_floor: 0.30,
-            recency_half_life: 500.0,
-            minimum_neighbors: 3,
-            minimum_neighbor_agreement: 0.85,
-            minimum_effective_support: 1.0,
-            minimum_vote_margin: 0.35,
-            near_exact_score: 0.97,
-            strong_support: 1.50,
-            strong_neighbor_count: 5,
         }
     }
 }
@@ -122,34 +95,51 @@ pub struct PayeeGroup {
     pub examples: usize,
 }
 
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PayeeIndexStats {
+    pub occurrences: usize,
+    pub exact_keys: usize,
+    pub comparison_forms: usize,
+    pub indexed_ngrams: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GeneratedPayee {
+    pub imported_payee: String,
+    pub canonical_payee: String,
+}
+
+struct Occurrence {
+    imported_payee: String,
+    resolved_payee: String,
+    position: usize,
+}
+
+struct IndexedForm {
+    comparison_form: String,
+    ngrams: HashSet<String>,
+    occurrences: Vec<usize>,
+}
+
 struct Group {
     key: String,
     display_name: String,
     aliases: BTreeMap<String, String>,
     examples: usize,
     ngrams: HashSet<String>,
-}
-
-struct HistoricalExample {
-    imported_payee: String,
-    resolved_key: String,
-    position: usize,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PayeeNeighbor {
-    pub imported_payee: String,
-    pub resolved_payee: String,
-    pub similarity: f64,
-    pub recency: f64,
-    pub vote: f64,
+    stable_ngrams: HashSet<String>,
+    comparison_forms: usize,
 }
 
 pub struct PayeeResolver {
+    occurrences: Vec<Occurrence>,
+    exact_index: HashMap<String, Vec<usize>>,
+    forms: Vec<IndexedForm>,
+    ngram_index: HashMap<String, Vec<usize>>,
     groups: Vec<Group>,
     idf: HashMap<String, f64>,
-    history: Vec<HistoricalExample>,
     options: PayeeResolverOptions,
 }
 
@@ -159,22 +149,38 @@ impl PayeeResolver {
     }
 
     pub fn with_options(examples: &[PayeeExample], options: PayeeResolverOptions) -> Self {
-        let mut grouped = BTreeMap::<String, Group>::new();
-        let mut history = Vec::with_capacity(examples.len());
-        for (position, example) in examples.iter().enumerate() {
-            let key = normalize_payee(&example.resolved_payee);
-            history.push(HistoricalExample {
+        let occurrences = examples
+            .iter()
+            .enumerate()
+            .map(|(position, example)| Occurrence {
                 imported_payee: example.imported_payee.clone(),
-                resolved_key: key.clone(),
+                resolved_payee: example.resolved_payee.clone(),
                 position,
-            });
-            let group = grouped.entry(key).or_insert_with(|| Group {
-                key: normalize_payee(&example.resolved_payee),
-                display_name: example.resolved_payee.clone(),
-                aliases: BTreeMap::new(),
-                examples: 0,
-                ngrams: HashSet::new(),
-            });
+            })
+            .collect::<Vec<_>>();
+        let mut exact_index = HashMap::<String, Vec<usize>>::new();
+        let mut forms = BTreeMap::<String, Vec<usize>>::new();
+        let mut grouped = BTreeMap::<String, Group>::new();
+        for (index, example) in examples.iter().enumerate() {
+            exact_index
+                .entry(normalize_payee(&example.imported_payee))
+                .or_default()
+                .push(index);
+            forms
+                .entry(normalize_for_similarity(&example.imported_payee))
+                .or_default()
+                .push(index);
+            let group = grouped
+                .entry(normalize_payee(&example.resolved_payee))
+                .or_insert_with(|| Group {
+                    key: normalize_payee(&example.resolved_payee),
+                    display_name: example.resolved_payee.clone(),
+                    aliases: BTreeMap::new(),
+                    examples: 0,
+                    ngrams: HashSet::new(),
+                    stable_ngrams: HashSet::new(),
+                    comparison_forms: 0,
+                });
             group.aliases.insert(
                 normalize_payee(&example.imported_payee),
                 example.imported_payee.clone(),
@@ -183,12 +189,24 @@ impl PayeeResolver {
         }
         let mut groups = grouped.into_values().collect::<Vec<_>>();
         for group in &mut groups {
-            for alias in group.aliases.values() {
-                group.ngrams.extend(character_ngrams(
-                    alias,
+            let comparison_forms = group
+                .aliases
+                .values()
+                .map(|alias| normalize_for_similarity(alias))
+                .collect::<HashSet<_>>();
+            group.comparison_forms = comparison_forms.len();
+            for (index, comparison_form) in comparison_forms.iter().enumerate() {
+                let ngrams = character_ngrams(
+                    comparison_form,
                     options.ngram_minimum,
                     options.ngram_maximum,
-                ));
+                );
+                group.ngrams.extend(ngrams.iter().cloned());
+                if index == 0 {
+                    group.stable_ngrams = ngrams;
+                } else {
+                    group.stable_ngrams.retain(|ngram| ngrams.contains(ngram));
+                }
             }
         }
         let mut document_frequency = HashMap::<String, usize>::new();
@@ -200,14 +218,37 @@ impl PayeeResolver {
         let idf = document_frequency
             .into_iter()
             .map(|(ngram, count)| {
-                let weight = (((groups.len() + 1) as f64) / ((count + 1) as f64)).ln() + 1.0;
-                (ngram, weight)
+                (
+                    ngram,
+                    (((groups.len() + 1) as f64) / ((count + 1) as f64)).ln() + 1.0,
+                )
             })
-            .collect();
+            .collect::<HashMap<_, _>>();
+        let forms = forms
+            .into_iter()
+            .map(|(comparison_form, occurrences)| IndexedForm {
+                ngrams: character_ngrams(
+                    &comparison_form,
+                    options.ngram_minimum,
+                    options.ngram_maximum,
+                ),
+                comparison_form,
+                occurrences,
+            })
+            .collect::<Vec<_>>();
+        let mut ngram_index = HashMap::<String, Vec<usize>>::new();
+        for (form_id, form) in forms.iter().enumerate() {
+            for ngram in &form.ngrams {
+                ngram_index.entry(ngram.clone()).or_default().push(form_id);
+            }
+        }
         Self {
+            occurrences,
+            exact_index,
+            forms,
+            ngram_index,
             groups,
             idf,
-            history,
             options,
         }
     }
@@ -223,333 +264,304 @@ impl PayeeResolver {
             .collect()
     }
 
-    pub fn resolve(&self, query: &PayeeQuery) -> PayeeResolution {
-        let normalized = normalize_payee(&query.imported_payee);
-        let exact = self
-            .groups
-            .iter()
-            .filter(|group| group.aliases.contains_key(&normalized))
-            .collect::<Vec<_>>();
-        if exact.len() == 1 {
-            return self.exact_result(query, exact[0], ResolutionMethod::Exact);
+    pub fn index_stats(&self) -> PayeeIndexStats {
+        PayeeIndexStats {
+            occurrences: self.occurrences.len(),
+            exact_keys: self.exact_index.len(),
+            comparison_forms: self.forms.len(),
+            indexed_ngrams: self.ngram_index.len(),
         }
-        if exact.len() > 1 {
+    }
+
+    pub fn resolve(&self, query: &PayeeQuery) -> PayeeResolution {
+        let exact_key = normalize_payee(&query.imported_payee);
+        if let Some(indices) = self.exact_index.get(&exact_key) {
+            let selected = indices
+                .iter()
+                .map(|index| &self.occurrences[*index])
+                .max_by_key(|occurrence| occurrence.position)
+                .expect("exact index is not empty");
+            let mut selected_candidate = candidate(selected, &exact_key, 1.0, true);
+            selected_candidate.selected = true;
             return PayeeResolution {
                 imported_payee: query.imported_payee.clone(),
-                resolved_payee: None,
-                method: ResolutionMethod::Unresolved,
-                score: 1.0,
-                margin: 0.0,
-                effective_support: 0.0,
-                neighbor_agreement: 0.0,
-                reason: "Exact imported payee has conflicting historical resolutions".into(),
-                candidates: exact
-                    .into_iter()
-                    .map(|group| exact_candidate(group))
-                    .collect(),
-                neighbors: Vec::new(),
+                resolved_payee: Some(selected.resolved_payee.clone()),
+                potential_payee: Some(selected.resolved_payee.clone()),
+                method: ResolutionMethod::ExactLatest,
+                best_score: 1.0,
+                runner_up_score: None,
+                minimum_score: self.options.minimum_score,
+                minimum_group_margin: self.options.minimum_group_margin,
+                reason: "Most recent exact normalized imported-payee match".into(),
+                selected_position: Some(selected.position),
+                candidates: vec![selected_candidate],
             };
         }
 
+        let comparison_form = normalize_for_similarity(&query.imported_payee);
         let query_ngrams = character_ngrams(
-            &query.imported_payee,
+            &comparison_form,
             self.options.ngram_minimum,
             self.options.ngram_maximum,
         );
-        let query_tokens = tokens(&query.imported_payee);
-        let group_names = self
-            .groups
-            .iter()
-            .map(|group| (group.key.as_str(), group.display_name.as_str()))
-            .collect::<HashMap<_, _>>();
-        let mut weighted_neighbors = self
-            .history
-            .iter()
-            .filter_map(|example| {
-                let (_, _, _, similarity) =
-                    self.alias_scores(&query_ngrams, &query_tokens, &example.imported_payee);
-                if similarity < self.options.neighbor_similarity_floor {
-                    return None;
-                }
-                let age = self.history.len().saturating_sub(example.position + 1) as f64;
-                let recency = 0.5_f64.powf(age / self.options.recency_half_life);
-                let vote = similarity * similarity * recency;
-                Some((
-                    PayeeNeighbor {
-                        imported_payee: example.imported_payee.clone(),
-                        resolved_payee: group_names[example.resolved_key.as_str()].into(),
-                        similarity: round(similarity),
-                        recency: round(recency),
-                        vote: round(vote),
-                    },
-                    example.resolved_key.clone(),
-                ))
+        let mut form_ids = HashSet::new();
+        for ngram in &query_ngrams {
+            if let Some(ids) = self.ngram_index.get(ngram) {
+                form_ids.extend(ids.iter().copied());
+            }
+        }
+        let mut scored_forms = form_ids
+            .into_iter()
+            .map(|form_id| {
+                let form = &self.forms[form_id];
+                let score = round(weighted_cosine(&query_ngrams, &form.ngrams, &self.idf));
+                (form_id, score)
             })
             .collect::<Vec<_>>();
-        weighted_neighbors.sort_by(|left, right| {
-            right
-                .0
-                .similarity
-                .total_cmp(&left.0.similarity)
-                .then_with(|| right.0.recency.total_cmp(&left.0.recency))
-        });
-        weighted_neighbors.truncate(self.options.nearest_neighbors);
-        let mut votes = HashMap::<String, (f64, usize)>::new();
-        for (neighbor, resolved_key) in &weighted_neighbors {
-            let entry = votes.entry(resolved_key.clone()).or_default();
-            entry.0 += neighbor.vote;
-            entry.1 += 1;
+        scored_forms.sort_by(|left, right| right.1.total_cmp(&left.1));
+        let mut group_scores = HashMap::<String, f64>::new();
+        for (form_id, score) in &scored_forms {
+            for index in &self.forms[*form_id].occurrences {
+                let group = normalize_payee(&self.occurrences[*index].resolved_payee);
+                group_scores
+                    .entry(group)
+                    .and_modify(|best| *best = best.max(*score))
+                    .or_insert(*score);
+            }
         }
-        let total_vote = votes.values().map(|(vote, _)| vote).sum::<f64>();
-        let neighbors = weighted_neighbors
-            .iter()
-            .map(|(neighbor, _)| neighbor.clone())
-            .collect::<Vec<_>>();
-        let mut candidates = self
+        let mut ranked_groups = self
             .groups
             .iter()
-            .map(|group| {
-                let mut character_score: f64 = 0.0;
-                let mut tfidf_score: f64 = 0.0;
-                let mut token_score: f64 = 0.0;
-                let mut lexical_score: f64 = 0.0;
-                for alias in group.aliases.values() {
-                    let (character, tfidf, token, combined) =
-                        self.alias_scores(&query_ngrams, &query_tokens, alias);
-                    character_score = character_score.max(character);
-                    tfidf_score = tfidf_score.max(tfidf);
-                    token_score = token_score.max(token);
-                    lexical_score = lexical_score.max(combined);
+            .filter_map(|group| {
+                let alias_score = group_scores.get(&group.key).copied()?;
+                let supported = group.comparison_forms >= 2 && !group.stable_ngrams.is_empty();
+                let score = if supported {
+                    round(weighted_cosine(
+                        &query_ngrams,
+                        &group.stable_ngrams,
+                        &self.idf,
+                    ))
+                } else {
+                    alias_score
+                };
+                Some((group.key.clone(), score, supported))
+            })
+            .collect::<Vec<_>>();
+        ranked_groups.sort_by(|left, right| {
+            right
+                .1
+                .total_cmp(&left.1)
+                .then_with(|| left.0.cmp(&right.0))
+        });
+        let best_score = ranked_groups.first().map_or(0.0, |group| group.1);
+        let runner_up_score = ranked_groups.get(1).map(|group| group.1);
+        let minimum_score = ranked_groups
+            .first()
+            .map_or(self.options.minimum_score, |group| {
+                if group.2 {
+                    self.options.minimum_supported_score
+                } else {
+                    self.options.minimum_score
                 }
-                let (neighbor_vote, neighbor_count) =
-                    votes.get(&group.key).copied().unwrap_or_default();
-                PayeeCandidate {
-                    resolved_payee: group.display_name.clone(),
-                    score: round(lexical_score),
-                    character_score: round(character_score),
-                    tfidf_score: round(tfidf_score),
-                    token_score: round(token_score),
-                    neighbor_count,
-                    neighbor_vote: round(neighbor_vote),
-                    neighbor_agreement: if total_vote == 0.0 {
-                        0.0
-                    } else {
-                        round(neighbor_vote / total_vote)
-                    },
-                    aliases: group.aliases.values().cloned().collect(),
-                    examples: group.examples,
-                }
+            });
+        let potential_payee = (best_score >= minimum_score)
+            .then(|| {
+                ranked_groups.first().and_then(|group| {
+                    self.groups
+                        .iter()
+                        .find(|candidate| candidate.key == group.0)
+                        .map(|candidate| candidate.display_name.clone())
+                })
+            })
+            .flatten();
+        if best_score < minimum_score {
+            return PayeeResolution {
+                imported_payee: query.imported_payee.clone(),
+                resolved_payee: None,
+                potential_payee,
+                method: ResolutionMethod::Unresolved,
+                best_score,
+                runner_up_score,
+                minimum_score,
+                minimum_group_margin: self.options.minimum_group_margin,
+                reason: format!(
+                    "Best payee-group score {best_score} did not reach minimum {}",
+                    minimum_score
+                ),
+                selected_position: None,
+                candidates: self.display_candidates(&scored_forms, None, None, None),
+            };
+        }
+        if let Some(runner_up_score) = runner_up_score
+            && round(best_score - runner_up_score) < self.options.minimum_group_margin
+        {
+            return PayeeResolution {
+                imported_payee: query.imported_payee.clone(),
+                resolved_payee: None,
+                potential_payee,
+                method: ResolutionMethod::Unresolved,
+                best_score,
+                runner_up_score: Some(runner_up_score),
+                minimum_score,
+                minimum_group_margin: self.options.minimum_group_margin,
+                reason: format!(
+                    "Best payee group led the runner-up by less than {}",
+                    self.options.minimum_group_margin
+                ),
+                selected_position: None,
+                candidates: self.display_candidates(&scored_forms, None, None, None),
+            };
+        }
+        let winning_group = &ranked_groups[0].0;
+        let used_stable_profile = ranked_groups[0].2;
+        let winning_alias_score = scored_forms
+            .iter()
+            .filter(|scored| {
+                self.forms[scored.0].occurrences.iter().any(|index| {
+                    normalize_payee(&self.occurrences[*index].resolved_payee) == *winning_group
+                })
+            })
+            .map(|scored| scored.1)
+            .max_by(f64::total_cmp)
+            .expect("winning fuzzy group contains a scored alias");
+        let selected_index = scored_forms
+            .iter()
+            .filter(|scored| scored.1 == winning_alias_score)
+            .flat_map(|scored| self.forms[scored.0].occurrences.iter())
+            .filter(|index| {
+                normalize_payee(&self.occurrences[**index].resolved_payee) == *winning_group
+            })
+            .copied()
+            .max_by_key(|index| self.occurrences[*index].position)
+            .expect("winning fuzzy group contains a best-scoring occurrence");
+        let selected = &self.occurrences[selected_index];
+        PayeeResolution {
+            imported_payee: query.imported_payee.clone(),
+            resolved_payee: Some(selected.resolved_payee.clone()),
+            potential_payee: Some(selected.resolved_payee.clone()),
+            method: ResolutionMethod::FuzzyBest,
+            best_score,
+            runner_up_score,
+            minimum_score,
+            minimum_group_margin: self.options.minimum_group_margin,
+            reason: if used_stable_profile {
+                "Stable n-gram profile from repeated raw-payee formats won clearly".into()
+            } else {
+                "Best historical raw-payee match from the clear winning payee group".into()
+            },
+            selected_position: Some(selected.position),
+            candidates: self.display_candidates(
+                &scored_forms,
+                Some(winning_group),
+                Some(winning_alias_score),
+                Some(selected_index),
+            ),
+        }
+    }
+
+    fn display_candidates(
+        &self,
+        scored_forms: &[(usize, f64)],
+        eligible_group: Option<&str>,
+        eligible_score: Option<f64>,
+        selected_index: Option<usize>,
+    ) -> Vec<PayeeCandidate> {
+        let mut candidates = scored_forms
+            .iter()
+            .flat_map(|(form_id, score)| {
+                let form = &self.forms[*form_id];
+                form.occurrences.iter().map(move |index| {
+                    let occurrence = &self.occurrences[*index];
+                    candidate(
+                        occurrence,
+                        &form.comparison_form,
+                        *score,
+                        eligible_group.is_some_and(|group| {
+                            normalize_payee(&occurrence.resolved_payee) == group
+                        }) && eligible_score == Some(*score),
+                    )
+                })
             })
             .collect::<Vec<_>>();
         candidates.sort_by(|left, right| {
             right
-                .neighbor_vote
-                .total_cmp(&left.neighbor_vote)
-                .then_with(|| right.score.total_cmp(&left.score))
-                .then_with(|| left.resolved_payee.cmp(&right.resolved_payee))
+                .score
+                .total_cmp(&left.score)
+                .then_with(|| right.position.cmp(&left.position))
         });
-        candidates.truncate(5);
-        let best_score = candidates.first().map_or(0.0, |candidate| candidate.score);
-        let effective_support = candidates
-            .first()
-            .map_or(0.0, |candidate| candidate.neighbor_vote);
-        let neighbor_agreement = candidates
-            .first()
-            .map_or(0.0, |candidate| candidate.neighbor_agreement);
-        let second_vote = candidates
-            .get(1)
-            .map_or(0.0, |candidate| candidate.neighbor_vote);
-        let margin = round(effective_support - second_vote);
-        let supported_override = candidates.first().is_some_and(|best| {
-            best.score >= self.options.minimum_supported_score
-                && best.neighbor_count >= self.options.strong_neighbor_count
-                && best.neighbor_agreement >= self.options.minimum_neighbor_agreement
-                && best.neighbor_vote >= self.options.strong_support
-                && margin >= self.options.minimum_vote_margin
-        });
-        if best_score < self.options.minimum_score && !supported_override {
-            let reason = if neighbor_agreement < self.options.minimum_neighbor_agreement {
-                format!(
-                    "Neighborhood is split: {:.1}% agreement; minimum is {:.1}%",
-                    neighbor_agreement * 100.0,
-                    self.options.minimum_neighbor_agreement * 100.0
-                )
-            } else if margin < self.options.minimum_vote_margin {
-                format!(
-                    "Weighted vote margin {} did not reach minimum {}",
-                    margin, self.options.minimum_vote_margin
-                )
-            } else {
-                format!(
-                    "Vote leader lexical score {} did not reach minimum {}",
-                    best_score, self.options.minimum_score
-                )
-            };
-            return PayeeResolution {
-                imported_payee: query.imported_payee.clone(),
-                resolved_payee: None,
-                method: ResolutionMethod::Unresolved,
-                score: best_score,
-                margin,
-                effective_support,
-                neighbor_agreement,
-                reason,
-                candidates,
-                neighbors,
-            };
+        candidates.truncate(10);
+        if let Some(selected_index) = selected_index {
+            for candidate in &mut candidates {
+                candidate.selected = candidate.position == selected_index;
+            }
         }
-        let best = &candidates[0];
-        let near_exact = best.score >= self.options.near_exact_score;
-        if !near_exact && best.neighbor_count < self.options.minimum_neighbors {
-            return PayeeResolution {
-                imported_payee: query.imported_payee.clone(),
-                resolved_payee: None,
-                method: ResolutionMethod::Unresolved,
-                score: best_score,
-                margin,
-                effective_support,
-                neighbor_agreement,
-                reason: format!(
-                    "Winner had {} nearby examples; minimum is {}",
-                    best.neighbor_count, self.options.minimum_neighbors
-                ),
-                candidates,
-                neighbors,
-            };
-        }
-        if !near_exact && neighbor_agreement < self.options.minimum_neighbor_agreement {
-            return PayeeResolution {
-                imported_payee: query.imported_payee.clone(),
-                resolved_payee: None,
-                method: ResolutionMethod::Unresolved,
-                score: best_score,
-                margin,
-                effective_support,
-                neighbor_agreement,
-                reason: format!(
-                    "Neighbor agreement did not reach minimum {}",
-                    self.options.minimum_neighbor_agreement
-                ),
-                candidates,
-                neighbors,
-            };
-        }
-        if !near_exact && effective_support < self.options.minimum_effective_support {
-            return PayeeResolution {
-                imported_payee: query.imported_payee.clone(),
-                resolved_payee: None,
-                method: ResolutionMethod::Unresolved,
-                score: best_score,
-                margin,
-                effective_support,
-                neighbor_agreement,
-                reason: format!(
-                    "Effective support did not reach minimum {}",
-                    self.options.minimum_effective_support
-                ),
-                candidates,
-                neighbors,
-            };
-        }
-        if !near_exact && margin < self.options.minimum_vote_margin {
-            return PayeeResolution {
-                imported_payee: query.imported_payee.clone(),
-                resolved_payee: None,
-                method: ResolutionMethod::Unresolved,
-                score: best_score,
-                margin,
-                effective_support,
-                neighbor_agreement,
-                reason: format!(
-                    "Weighted vote margin did not reach minimum {}",
-                    self.options.minimum_vote_margin
-                ),
-                candidates,
-                neighbors,
-            };
-        }
-        PayeeResolution {
-            imported_payee: query.imported_payee.clone(),
-            resolved_payee: Some(best.resolved_payee.clone()),
-            method: ResolutionMethod::Fuzzy,
-            score: best.score,
-            margin,
-            effective_support,
-            neighbor_agreement,
-            reason: if near_exact {
-                "Near-exact historical alias match".into()
-            } else if supported_override {
-                "Dense, unanimous recent-neighbor support".into()
-            } else {
-                "High-confidence recency-weighted nearest-neighbor agreement".into()
-            },
-            candidates,
-            neighbors,
-        }
+        candidates
     }
+}
 
-    fn alias_scores(
-        &self,
-        query_ngrams: &HashSet<String>,
-        query_tokens: &HashSet<String>,
-        alias: &str,
-    ) -> (f64, f64, f64, f64) {
-        let alias_ngrams = character_ngrams(
-            alias,
-            self.options.ngram_minimum,
-            self.options.ngram_maximum,
-        );
-        let character = set_cosine(query_ngrams, &alias_ngrams);
-        let tfidf = weighted_cosine(query_ngrams, &alias_ngrams, &self.idf);
-        let token = jaccard(query_tokens, &tokens(alias));
-        let combined = (0.45 * character + 0.35 * tfidf + 0.15 * token) / 0.95;
-        (character, tfidf, token, combined)
-    }
-
-    fn exact_result(
-        &self,
-        query: &PayeeQuery,
-        group: &Group,
-        method: ResolutionMethod,
-    ) -> PayeeResolution {
-        PayeeResolution {
-            imported_payee: query.imported_payee.clone(),
-            resolved_payee: Some(group.display_name.clone()),
-            method,
-            score: 1.0,
-            margin: 1.0,
-            effective_support: group.examples as f64,
-            neighbor_agreement: 1.0,
-            reason: "Exact imported payee has one historical resolution".into(),
-            candidates: vec![exact_candidate(group)],
-            neighbors: Vec::new(),
-        }
+fn candidate(
+    occurrence: &Occurrence,
+    comparison_form: &str,
+    score: f64,
+    eligible: bool,
+) -> PayeeCandidate {
+    PayeeCandidate {
+        imported_payee: occurrence.imported_payee.clone(),
+        resolved_payee: occurrence.resolved_payee.clone(),
+        comparison_form: comparison_form.into(),
+        score: round(score),
+        position: occurrence.position,
+        eligible,
+        selected: false,
     }
 }
 
 pub fn generate_fuzzy_payees(payee: &str, seed: u64, count: usize) -> Vec<GeneratedPayee> {
-    const CITIES: &[&str] = &["RICHMOND VA", "MIDLOTHIAN VA", "ONLINE", "WEB"];
     let mut random = Lcg(seed);
     let mut generated = Vec::with_capacity(count);
     for index in 0..count {
-        let uppercase = payee.to_uppercase();
-        let compact = uppercase.replace([' ', '\'', '.'], "");
-        let number = 1000 + random.next_usize(9000);
-        let city = CITIES[random.next_usize(CITIES.len())];
-        let imported = match index % 6 {
-            0 => format!("POS PURCHASE {uppercase} #{number}"),
-            1 => format!("TST*{uppercase} {number}"),
-            2 => format!("SQ *{uppercase} #{number} {city}"),
-            3 => format!("{compact}*{number}"),
-            4 => format!("{uppercase} STORE {number} {city}"),
-            _ => format!("DEBIT CARD {uppercase} {number}"),
-        };
         generated.push(GeneratedPayee {
-            imported_payee: imported,
+            imported_payee: fuzzy_payee(payee, index, &mut random),
             canonical_payee: payee.into(),
         });
     }
     generated
+}
+
+pub fn generate_related_fuzzy_payees(payee: &str, seed: u64, count: usize) -> Vec<GeneratedPayee> {
+    const RELATED_SUFFIXES: &[&str] = &["", "Prime", "Video"];
+    let mut random = Lcg(seed);
+    let mut generated = Vec::with_capacity(count);
+    for index in 0..count {
+        let suffix = RELATED_SUFFIXES[index % RELATED_SUFFIXES.len()];
+        let canonical = if suffix.is_empty() {
+            payee.to_owned()
+        } else {
+            format!("{payee} {suffix}")
+        };
+        let template = (index / RELATED_SUFFIXES.len()) % 6;
+        generated.push(GeneratedPayee {
+            imported_payee: fuzzy_payee(&canonical, template, &mut random),
+            canonical_payee: canonical,
+        });
+    }
+    generated
+}
+
+fn fuzzy_payee(payee: &str, template: usize, random: &mut Lcg) -> String {
+    const CITIES: &[&str] = &["RICHMOND VA", "MIDLOTHIAN VA", "ONLINE", "WEB"];
+    let uppercase = payee.to_uppercase();
+    let compact = uppercase.replace([' ', '\'', '.'], "");
+    let number = 1000 + random.next_usize(9000);
+    let city = CITIES[random.next_usize(CITIES.len())];
+    match template % 6 {
+        0 => format!("POS PURCHASE {uppercase} #{number}"),
+        1 => format!("TST*{uppercase} {number}"),
+        2 => format!("SQ *{uppercase} #{number} {city}"),
+        3 => format!("{compact}*{number}"),
+        4 => format!("{uppercase} STORE {number} {city}"),
+        _ => format!("DEBIT CARD {uppercase} {number}"),
+    }
 }
 
 struct Lcg(u64);
@@ -575,8 +587,36 @@ pub fn normalize_payee(value: &str) -> String {
         .join(" ")
 }
 
+pub fn clean_payee_name(value: &str) -> String {
+    strip_square_prefix(value)
+        .split_whitespace()
+        .map(|word| {
+            let mut capitalize = true;
+            word.chars()
+                .flat_map(|character| {
+                    if capitalize && character.is_alphabetic() {
+                        capitalize = false;
+                        character.to_uppercase().collect::<Vec<_>>()
+                    } else {
+                        character.to_lowercase().collect::<Vec<_>>()
+                    }
+                })
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+pub fn payee_similarity(left: &str, right: &str) -> f64 {
+    let left_ngrams = character_ngrams(left, 3, 5);
+    let right_ngrams = character_ngrams(right, 3, 5);
+    let character = set_cosine(&left_ngrams, &right_ngrams);
+    let token = jaccard(&tokens(left), &tokens(right));
+    round(0.8 * character + 0.2 * token)
+}
+
 fn normalize_for_similarity(value: &str) -> String {
-    let normalized = normalize_payee(value);
+    let normalized = normalize_payee(strip_square_prefix(value));
     let mut output = String::new();
     let mut digits = String::new();
     let flush_digits = |output: &mut String, digits: &mut String| {
@@ -601,6 +641,21 @@ fn normalize_for_similarity(value: &str) -> String {
     }
     flush_digits(&mut output, &mut digits);
     output.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn strip_square_prefix(value: &str) -> &str {
+    let value = value.trim();
+    let Some(prefix) = value.get(..2) else {
+        return value;
+    };
+    if !prefix.eq_ignore_ascii_case("sq") {
+        return value;
+    }
+    let remainder = value[2..].trim_start();
+    remainder
+        .strip_prefix('*')
+        .map(str::trim_start)
+        .unwrap_or(value)
 }
 
 fn character_ngrams(value: &str, minimum: usize, maximum: usize) -> HashSet<String> {
@@ -666,21 +721,6 @@ fn jaccard(left: &HashSet<String>, right: &HashSet<String>) -> f64 {
     intersection as f64 / union as f64
 }
 
-fn exact_candidate(group: &Group) -> PayeeCandidate {
-    PayeeCandidate {
-        resolved_payee: group.display_name.clone(),
-        score: 1.0,
-        character_score: 1.0,
-        tfidf_score: 1.0,
-        token_score: 1.0,
-        neighbor_count: group.examples,
-        neighbor_vote: group.examples as f64,
-        neighbor_agreement: 1.0,
-        aliases: group.aliases.values().cloned().collect(),
-        examples: group.examples,
-    }
-}
-
 fn round(value: f64) -> f64 {
     (value * 10_000.0).round() / 10_000.0
 }
@@ -698,6 +738,18 @@ mod tests {
         assert_eq!(
             normalize_payee("  STARBUCKS\t MOBILE  "),
             "starbucks mobile"
+        );
+    }
+
+    #[test]
+    fn cleans_square_prefix_and_title_cases_fallback_payees() {
+        assert_eq!(
+            clean_payee_name("  SQ *BLANCHARD'S BROAD  "),
+            "Blanchard's Broad"
+        );
+        assert_eq!(
+            normalize_for_similarity("SQ *AMAZON MARKETPLACE #1234"),
+            normalize_for_similarity("Amazon Marketplace #9876")
         );
     }
 
@@ -731,17 +783,136 @@ mod tests {
     }
 
     #[test]
-    fn conflicting_exact_payees_remain_unresolved() {
-        let fixtures = fixtures();
-        let resolver = PayeeResolver::new(&fixtures.history);
-        assert!(
-            resolver
-                .resolve(&PayeeQuery {
-                    imported_payee: "PAYMENT".into(),
-                })
-                .resolved_payee
-                .is_none()
-        );
+    fn latest_exact_match_wins() {
+        let resolver = PayeeResolver::new(&[
+            PayeeExample {
+                imported_payee: "STARBUCKS MOBILE".into(),
+                resolved_payee: "Starbucks".into(),
+            },
+            PayeeExample {
+                imported_payee: "STARBUCKS MOBILE".into(),
+                resolved_payee: "Starbucks Coffee".into(),
+            },
+        ]);
+        let result = resolver.resolve(&PayeeQuery {
+            imported_payee: " starbucks   mobile ".into(),
+        });
+        assert_eq!(result.resolved_payee.as_deref(), Some("Starbucks Coffee"));
+        assert_eq!(result.method, ResolutionMethod::ExactLatest);
+    }
+
+    #[test]
+    fn conflicting_fuzzy_groups_remain_unresolved() {
+        let resolver = PayeeResolver::new(&[
+            PayeeExample {
+                imported_payee: "TST*STARBUCKS 1001".into(),
+                resolved_payee: "Starbucks".into(),
+            },
+            PayeeExample {
+                imported_payee: "TST*STARBUCKS 2002".into(),
+                resolved_payee: "Starbucks Coffee".into(),
+            },
+        ]);
+        let result = resolver.resolve(&PayeeQuery {
+            imported_payee: "TST STARBUCKS 9999".into(),
+        });
+        assert_eq!(result.resolved_payee, None);
+        assert_eq!(result.method, ResolutionMethod::Unresolved);
+        assert_eq!(result.runner_up_score, Some(1.0));
+        assert_eq!(result.potential_payee.as_deref(), Some("Starbucks"));
+    }
+
+    #[test]
+    fn recent_weak_match_cannot_override_better_older_match() {
+        let resolver = PayeeResolver::new(&[
+            PayeeExample {
+                imported_payee: "SQ *JOES COFFEE #104 RICHMOND".into(),
+                resolved_payee: "Joe's Coffee".into(),
+            },
+            PayeeExample {
+                imported_payee: "RIVER CITY BOOKS".into(),
+                resolved_payee: "River City Books".into(),
+            },
+        ]);
+        let result = resolver.resolve(&PayeeQuery {
+            imported_payee: "SQ JOES COFFEE #999 RICHMOND".into(),
+        });
+        assert_eq!(result.resolved_payee.as_deref(), Some("Joe's Coffee"));
+    }
+
+    #[test]
+    fn amazon_prime_does_not_inherit_plain_amazon() {
+        let history = (0..100)
+            .map(|number| PayeeExample {
+                imported_payee: format!("POS PURCHASE AMAZON #{number:04}"),
+                resolved_payee: "Amazon".into(),
+            })
+            .collect::<Vec<_>>();
+        let result = PayeeResolver::new(&history).resolve(&PayeeQuery {
+            imported_payee: "POS PURCHASE AMAZON PRIME #4595".into(),
+        });
+
+        assert_eq!(result.resolved_payee, None);
+        assert_eq!(result.potential_payee, None);
+        assert!(result.best_score < result.minimum_score);
+    }
+
+    #[test]
+    fn plain_amazon_does_not_inherit_amazon_prime() {
+        let history = (0..10)
+            .map(|number| PayeeExample {
+                imported_payee: format!("POS PURCHASE AMAZON PRIME #{number:04}"),
+                resolved_payee: "Amazon Prime".into(),
+            })
+            .collect::<Vec<_>>();
+        let result = PayeeResolver::new(&history).resolve(&PayeeQuery {
+            imported_payee: "POS PURCHASE AMAZON #4595".into(),
+        });
+
+        assert_eq!(result.resolved_payee, None);
+        assert!(result.best_score < result.minimum_score);
+    }
+
+    #[test]
+    fn amazon_prime_matches_after_one_similar_example() {
+        let result = PayeeResolver::new(&[PayeeExample {
+            imported_payee: "POS PURCHASE AMAZON PRIME #1001".into(),
+            resolved_payee: "Amazon Prime".into(),
+        }])
+        .resolve(&PayeeQuery {
+            imported_payee: "POS PURCHASE AMAZON PRIME #4595".into(),
+        });
+
+        assert_eq!(result.resolved_payee.as_deref(), Some("Amazon Prime"));
+        assert_eq!(result.method, ResolutionMethod::FuzzyBest);
+        assert_eq!(result.best_score, 1.0);
+    }
+
+    #[test]
+    fn related_payees_resolve_after_two_distinct_raw_formats() {
+        let generated = generate_related_fuzzy_payees("amazon", 42, 10);
+        let mut history = Vec::new();
+
+        for (index, generated) in generated.into_iter().enumerate() {
+            let result = PayeeResolver::new(&history).resolve(&PayeeQuery {
+                imported_payee: generated.imported_payee.clone(),
+            });
+            if index < 6 {
+                assert_eq!(result.resolved_payee, None, "step {}", index + 1);
+            } else {
+                assert_eq!(
+                    result.resolved_payee.as_deref().map(normalize_payee),
+                    Some(normalize_payee(&generated.canonical_payee)),
+                    "step {}",
+                    index + 1
+                );
+                assert_eq!(result.minimum_score, 0.5, "step {}", index + 1);
+            }
+            history.push(PayeeExample {
+                imported_payee: generated.imported_payee,
+                resolved_payee: normalize_payee(&generated.canonical_payee),
+            });
+        }
     }
 
     #[test]
@@ -758,21 +929,34 @@ mod tests {
     }
 
     #[test]
-    fn multiple_nearby_examples_supply_effective_support() {
-        let generated = generate_fuzzy_payees("Starbucks", 42, 4);
-        let history = generated[..3]
+    fn related_generator_creates_distinct_payee_family() {
+        let generated = generate_related_fuzzy_payees("Amazon", 42, 3);
+        let names = generated
             .iter()
-            .map(|payee| PayeeExample {
-                imported_payee: payee.imported_payee.clone(),
-                resolved_payee: "Starbucks".into(),
-            })
+            .map(|payee| payee.canonical_payee.as_str())
             .collect::<Vec<_>>();
-        let result = PayeeResolver::new(&history).resolve(&PayeeQuery {
-            imported_payee: generated[3].imported_payee.clone(),
-        });
-        assert_eq!(result.resolved_payee.as_deref(), Some("Starbucks"));
-        assert_eq!(result.candidates[0].neighbor_count, 3);
-        assert_eq!(result.neighbor_agreement, 1.0);
-        assert!(result.effective_support >= 1.0);
+        assert_eq!(names, vec!["Amazon", "Amazon Prime", "Amazon Video",]);
+        assert!(
+            generated
+                .iter()
+                .all(|payee| payee.imported_payee.starts_with("POS PURCHASE"))
+        );
+    }
+
+    #[test]
+    fn index_collapses_fuzzy_forms_but_keeps_occurrences() {
+        let resolver = PayeeResolver::new(&[
+            PayeeExample {
+                imported_payee: "DEBIT CARD STARBUCKS 1001".into(),
+                resolved_payee: "Starbucks".into(),
+            },
+            PayeeExample {
+                imported_payee: "DEBIT CARD STARBUCKS 2002".into(),
+                resolved_payee: "Starbucks Coffee".into(),
+            },
+        ]);
+        let stats = resolver.index_stats();
+        assert_eq!(stats.occurrences, 2);
+        assert_eq!(stats.comparison_forms, 1);
     }
 }

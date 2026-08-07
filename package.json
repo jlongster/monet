@@ -6,7 +6,7 @@
   "scripts": {
     "demo-importer": "bun demo-importer/server.ts",
     "inference-opencode": "bun inference-plugins/opencode/index.ts",
-    "dev": "bun --watch src/index.tsx",
+    "dev": "bun scripts/dev.ts",
     "start": "bun src/index.tsx",
     "test": "bun test --pass-with-no-tests",
     "typecheck": "tsc --noEmit"

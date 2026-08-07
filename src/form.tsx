@@ -55,10 +55,11 @@ type FormButtonProps = {
   label: string
   focused: boolean
   disabled?: boolean
+  onFocus?: () => void
   onPress: () => void
 }
 
-export function FormButton({ id, label, focused, disabled = false, onPress }: FormButtonProps) {
+export function FormButton({ id, label, focused, disabled = false, onFocus, onPress }: FormButtonProps) {
   return (
     <box id={id} style={{ width: "100%", height: 1, flexDirection: "row" }}>
       <text fg={focused && !disabled ? gray[200] : gray[700]} style={{ width: 1 }}>
@@ -73,7 +74,10 @@ export function FormButton({ id, label, focused, disabled = false, onPress }: Fo
           justifyContent: "center",
           backgroundColor: focused && !disabled ? selectionBackground : gray[800],
         }}
-        onMouseDown={disabled ? undefined : onPress}
+        onMouseDown={disabled ? undefined : () => {
+          onFocus?.()
+          onPress()
+        }}
       >
         <text fg={disabled ? gray[600] : focused ? gray[100] : gray[300]}>{label}</text>
       </box>

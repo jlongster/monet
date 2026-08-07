@@ -1,8 +1,8 @@
 # Payee Resolution Prototype
 
-This Rust module is isolated from the server, import pipeline, and account categorization. It learns
-from historical `(imported payee, user-resolved payee)` examples and resolves new imported
-payees with exact matching or conservative fuzzy retrieval.
+This Rust module learns from historical `(imported payee, resolved payee)` examples and resolves new
+imported payees with exact matching or conservative fuzzy retrieval. The server uses it for raw-payee
+imports; account categorization remains separate.
 
 Run the fixture evaluation:
 
@@ -33,9 +33,46 @@ imported payee, current suggestion, method, score, margin, and candidate score c
 resolved payee to add it as the next training example, press Enter to accept a suggestion, type
 `skip` to leave the resolver unchanged, or `quit` to end the session.
 
-The resolver uses exact minimally normalized matches, character n-gram cosine similarity,
-resolved-payee-group TF-IDF, token Jaccard similarity, and recency-weighted nearest-neighbor voting.
-The nearest 5 historical examples vote by `similarity² × recency`; acceptance requires lexical
-similarity, support, resolved-payee agreement, and vote margin, with a near-exact exception. Fuzzy
-comparison normalizes punctuation separators and replaces numeric runs of three or more digits with
-a placeholder. Original payee strings are never modified.
+Every interactive session writes an incrementally flushed JSONL transcript under
+`.money-tui/logs/payee-eval/<session-id>.jsonl`. Use `--log /path/session.jsonl` to override it. Each
+step records the generated input, complete resolver decision and candidates, raw user answer, applied
+resolution, and updated history size. Normal completion adds a summary; Ctrl+C still leaves a valid
+transcript through the last displayed prompt.
+
+Add `--related` to generate meaningfully distinct names from one base payee while still applying the
+same processor, store, location, and number fuzzing:
+
+```sh
+cargo run --manifest-path server/Cargo.toml --bin payee_eval -- \
+  --interactive --payee Amazon --related --steps 32
+```
+
+The built-in family cycles through three identities: Amazon, Amazon Prime, and Amazon Video. Your
+entered resolutions determine whether the resolver keeps these identities separate or merges them.
+
+The resolver builds exact and fuzzy indexes once from historical examples. Exact normalized matches
+use the most recent occurrence. Fuzzy matching retrieves precomputed raw-payee comparison forms
+through an inverted character n-gram index and ranks them with resolved-payee-group TF-IDF cosine.
+A group with one raw format must score at least `0.90`. After two distinct raw formats have resolved
+to the same payee, their shared n-grams form a stable profile and use a `0.50` minimum, discounting
+processor and location text that changes between examples. The winner must lead the runner-up group
+by at least `0.05`; otherwise the payee remains unresolved. Numeric runs of three or more digits
+become a comparison placeholder; original payee strings are never modified.
+
+A leading Square processor prefix (`SQ *`, case-insensitive) is removed from fuzzy comparison and
+from newly cleaned output names. If inference is unavailable or invalid, Monet persists a title-cased
+version of the imported payee instead of leaving the raw description as the displayed payee.
+
+During production imports, unresolved raw payees fall back to configured inference in batches of 100.
+Each input has a temporary `pN` identifier, the complete imported payee, and the winning local payee
+group as an optional potential. The structured response must return exactly the same identifiers or
+the whole batch is rejected. Valid cleaned payees are applied through ordinary `set payee` changes
+and become historical examples when the next resolver snapshot is built. When categorization is
+enabled for the sync, the same request includes every income and expense account under temporary
+`cN` category identifiers. Inference may return one valid category identifier or `null` when it is
+not confident.
+
+Production imports process globally ordered transaction batches of 200 by default, configurable with
+`MONET_TRANSACTION_BATCH_SIZE`. A new resolver snapshot is built from committed, non-pending payee
+history before every batch, so local and inferred resolutions train the next batch without affecting
+other transactions in their own batch.

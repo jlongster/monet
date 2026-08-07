@@ -99,6 +99,10 @@ export type AccountTransaction = {
   notes: string | null
   posting_count: number
   unallocated_amount: number
+  logs: Array<{
+    message: string
+    created_at: string
+  }>
   other_postings: Array<{
     posting_id: string
     account_id: string | null
@@ -114,6 +118,7 @@ export type TransactionChange =
 type AccountCursor = {
   date: string
   source_id: string
+  posting_id: string
 }
 
 type AccountPage = {
@@ -339,6 +344,7 @@ const accountPagePath = (
   if (cursor) {
     query.set("before_date", cursor.date)
     query.set("before_source_id", cursor.source_id)
+    query.set("before_posting_id", cursor.posting_id)
   }
   const path = accountId === ALL_TRANSACTIONS_ID
     ? "/transactions"
@@ -843,10 +849,10 @@ const loadMoreTransactions = (registry: Registry.Registry) => {
               current.busy ||
               !cursorsEqual(current.nextCursor, cursor)
             ) return current
-            const knownSourceIds = new Set(current.transactions.map((transaction) => transaction.source_id))
+            const knownPostingIds = new Set(current.transactions.map((transaction) => transaction.posting_id))
             const transactions = [
               ...current.transactions,
-              ...page.transactions.filter((transaction) => !knownSourceIds.has(transaction.source_id)),
+              ...page.transactions.filter((transaction) => !knownPostingIds.has(transaction.posting_id)),
             ]
             const pendingIndex = current.pendingTransactionIndex
             const reachedPendingIndex = pendingIndex !== null &&
@@ -1118,6 +1124,46 @@ export const createAccount = (registry: Registry.Registry) => {
   )
 }
 
+const debugCategoryAccounts: ReadonlyArray<{
+  id: string
+  parent_id: string | null
+  name: string
+  type: "expense" | "income"
+}> = [
+  { id: "019fd900-0000-7000-8000-000000000001", parent_id: null, name: "Expense", type: "expense" },
+  { id: "019fd900-0000-7000-8000-000000000002", parent_id: "019fd900-0000-7000-8000-000000000001", name: "Life", type: "expense" },
+  { id: "019fd900-0000-7000-8000-000000000003", parent_id: "019fd900-0000-7000-8000-000000000001", name: "Food", type: "expense" },
+  { id: "019fd900-0000-7000-8000-000000000004", parent_id: "019fd900-0000-7000-8000-000000000001", name: "Tithe", type: "expense" },
+  { id: "019fd900-0000-7000-8000-000000000005", parent_id: "019fd900-0000-7000-8000-000000000001", name: "Kids", type: "expense" },
+  { id: "019fd900-0000-7000-8000-000000000006", parent_id: "019fd900-0000-7000-8000-000000000001", name: "Clothing", type: "expense" },
+  { id: "019fd900-0000-7000-8000-000000000007", parent_id: null, name: "Income", type: "income" },
+  { id: "019fd900-0000-7000-8000-000000000008", parent_id: "019fd900-0000-7000-8000-000000000007", name: "Salary", type: "income" },
+  { id: "019fd900-0000-7000-8000-000000000009", parent_id: "019fd900-0000-7000-8000-000000000007", name: "Misc", type: "income" },
+]
+
+export const createDebugCategories = (registry: Registry.Registry) => {
+  const state = registry.get(stateAtom)
+  if (state.busy) return
+  setBusy(registry, "Creating debug categories")
+  execute(
+    registry,
+    Effect.gen(function* () {
+      for (const account of debugCategoryAccounts) {
+        yield* request<Account>(`/accounts/${account.id}`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            name: account.name,
+            type: account.type,
+            parent_id: account.parent_id,
+          }),
+        })
+      }
+      yield* load(registry, state.selectedAccountId, "Created debug categories")
+    }),
+  )
+}
+
 export const deleteAccount = (
   registry: Registry.Registry,
   accountId: string,
@@ -1230,6 +1276,65 @@ export const assignToAccount = (registry: Registry.Registry, accountId?: string)
   )
 }
 
+export const setInlineCounterpart = (
+  registry: Registry.Registry,
+  accountId: string,
+) => {
+  const state = registry.get(stateAtom)
+  const transaction = state.transactions[state.selectedTransactionIndex]
+  if (!transaction || state.busy || transaction.other_postings.length > 1) return
+  const existing = transaction.other_postings[0]
+  if (!existing && transaction.unallocated_amount === 0) return
+  setBusy(registry, "Updating counterpart")
+  execute(
+    registry,
+    Effect.gen(function* () {
+      const postingId = existing?.posting_id ?? crypto.randomUUID()
+      const changes = existing
+        ? [{ operation: "set", target_id: postingId, field: "account_id", value: accountId }]
+        : [
+            { operation: "split", target_id: postingId },
+            { operation: "set", target_id: postingId, field: "account_id", value: accountId },
+            {
+              operation: "set",
+              target_id: postingId,
+              field: "amount",
+              value: transaction.unallocated_amount,
+            },
+          ]
+      yield* request(`/sources/${transaction.source_id}/changes`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ changes }),
+      })
+      const buffer = yield* fetchTransactionBuffer(
+        state.selectedAccountId!,
+        Math.max(state.transactions.length, TRANSACTION_PAGE_SIZE * 2),
+        registry.get(accountViewAtom),
+        registry.get(transactionSearchAtom),
+      )
+      const selectedIndex = buffer.transactions.findIndex(
+        (candidate) =>
+          candidate.source_id === transaction.source_id &&
+          candidate.posting_id === transaction.posting_id,
+      )
+      registry.update(stateAtom, (current) => ({
+        ...current,
+        transactions: buffer.transactions,
+        selectedTransactionIndex: selectedIndex >= 0
+          ? selectedIndex
+          : Math.max(0, buffer.transactions.findIndex(
+            (candidate) => candidate.source_id === transaction.source_id,
+          )),
+        nextCursor: buffer.nextCursor,
+        busy: false,
+        message: "Updated counterpart",
+      }))
+      ensureTransactionBuffer(registry)
+    }),
+  )
+}
+
 export const saveTransactionChanges = (
   registry: Registry.Registry,
   sourceId: string,
@@ -1274,12 +1379,22 @@ export const saveTransactionChanges = (
   )
 }
 
-export const sync = (registry: Registry.Registry) => {
+export type SyncOptions = {
+  endDate: string
+}
+
+export const sync = (
+  registry: Registry.Registry,
+  options: SyncOptions,
+) => {
   const current = registry.get(stateAtom)
-  if (current.busy) return
-  const selected = current.selectedAccountId
+  if (current.busy || registry.get(syncLogAtom).running) return
   registry.set(syncLogAtom, { running: true, lines: ["Starting transaction sync"] })
-  setBusy(registry, "Syncing all accounts")
+  registry.update(stateAtom, (state) => ({
+    ...state,
+    message: "Syncing all accounts in background",
+    error: null,
+  }))
   const refreshLog = request<{ running: boolean; lines: string[] }>("/import/logs").pipe(
     Effect.tap((log) => Effect.sync(() => registry.set(syncLogAtom, log))),
     Effect.catchAll(() => Effect.void),
@@ -1296,11 +1411,15 @@ export const sync = (registry: Registry.Registry) => {
         deleted_pending: number
         categorized: number
         payees_resolved: number
-      }>("/import/run", { method: "POST" })
+      }>("/import/run", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(options),
+      })
       yield* refreshLog
       yield* load(
         registry,
-        selected,
+        registry.get(stateAtom).selectedAccountId,
         `Synced ${summary.accounts} accounts / ${summary.transactions} transactions / resolved ${summary.payees_resolved} payees / categorized ${summary.categorized}`,
       )
     }).pipe(

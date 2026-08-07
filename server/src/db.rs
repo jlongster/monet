@@ -9,17 +9,42 @@ use serde_json::Value;
 use thiserror::Error;
 use uuid::Uuid;
 
-use monet_server::payee_resolution::{PayeeExample, PayeeQuery, PayeeResolver};
+use monet_server::{
+    categorization::{CategorizationExample, CategorizationQuery, SourceAccountType},
+    payee_resolution::{PayeeExample, PayeeQuery, PayeeResolver},
+};
 
 use crate::model::{
     AccountCursor, AccountDeletion, AccountInput, AccountRecord, AccountTransaction,
     AccountTransactionsPage, AccountType, Change, ImportedAccount, ImportedTransaction,
     ImportedTransactions, ModelError, OtherPosting, Posting, PostingData, Projection, SourceBundle,
-    SourceInput, SourceRecord, SourceTransactionData, StoredChange, reduce,
+    SourceInput, SourceRecord, SourceTransactionData, StoredChange, TransactionLog, reduce,
 };
 
 pub struct Database {
     connection: Connection,
+}
+
+pub struct UnresolvedPayee {
+    pub source_id: String,
+    pub imported_payee: String,
+    pub potential_payee: Option<String>,
+    pub amount_direction: String,
+    pub local_reason: String,
+}
+
+pub struct ResolvedPayee {
+    pub imported_payee: String,
+    pub resolved_payee: String,
+}
+
+pub struct SyncBatchResult {
+    pub transactions: usize,
+    pub deleted_pending: usize,
+    pub processed_source_ids: Vec<String>,
+    pub new_source_ids: Vec<String>,
+    pub resolved_payees: Vec<ResolvedPayee>,
+    pub unresolved_payees: Vec<UnresolvedPayee>,
 }
 
 const IMPORT_SOURCE_ID: &str = "1d0e63d1-47f5-5f67-92e1-fc7a575b34c1";
@@ -290,12 +315,22 @@ impl Database {
         account: &AccountRecord,
         imported: ImportedTransactions,
         payee_resolver: Option<&PayeeResolver>,
-    ) -> Result<(usize, usize, Vec<String>, usize), DatabaseError> {
-        let external_account_id = account
-            .external_id
-            .as_deref()
-            .ok_or_else(|| DatabaseError::AccountNotFound(account.id.clone()))?;
-        let namespace = import_namespace();
+    ) -> Result<SyncBatchResult, DatabaseError> {
+        Self::validate_transaction_snapshot(&imported)?;
+        let items = imported
+            .transactions
+            .iter()
+            .map(|transaction| (account, transaction))
+            .collect::<Vec<_>>();
+        let mut result = self.sync_transaction_batch(&items, payee_resolver)?;
+        result.deleted_pending =
+            self.cleanup_pending_transactions(&[(account, &imported.pending_ids)])?;
+        Ok(result)
+    }
+
+    pub fn validate_transaction_snapshot(
+        imported: &ImportedTransactions,
+    ) -> Result<(), DatabaseError> {
         let mut transaction_ids = HashSet::new();
         let pending_ids: HashSet<&str> = imported.pending_ids.iter().map(String::as_str).collect();
         for transaction in &imported.transactions {
@@ -313,11 +348,25 @@ impl Database {
                 return Err(ModelError::InvalidExternalId.into());
             }
         }
+        Ok(())
+    }
 
+    pub fn sync_transaction_batch(
+        &mut self,
+        items: &[(&AccountRecord, &ImportedTransaction)],
+        payee_resolver: Option<&PayeeResolver>,
+    ) -> Result<SyncBatchResult, DatabaseError> {
+        let namespace = import_namespace();
         let tx = self.connection.transaction()?;
+        let mut processed_source_ids = Vec::new();
         let mut new_source_ids = Vec::new();
-        let mut matched_payees = 0;
-        for transaction in &imported.transactions {
+        let mut resolved_payees = Vec::new();
+        let mut unresolved_payees = Vec::new();
+        for (account, transaction) in items {
+            let external_account_id = account
+                .external_id
+                .as_deref()
+                .ok_or_else(|| DatabaseError::AccountNotFound(account.id.clone()))?;
             let current_source_id =
                 existing_imported_source_id(&tx, external_account_id, &transaction.id, false)?;
             let pending_source_id = if current_source_id.is_none() {
@@ -350,56 +399,109 @@ impl Database {
             if is_new
                 && let (Some(resolver), Some(imported_payee)) =
                     (payee_resolver, transaction.payee.as_ref())
-                && let Some(resolved_payee) = resolver
-                    .resolve(&PayeeQuery {
-                        imported_payee: imported_payee.clone(),
-                    })
-                    .resolved_payee
-                && resolved_payee != *imported_payee
             {
-                tx.execute(
-                    "INSERT INTO transactions_changes (
-                        source_id, operation, target_id, field, value_json
-                     ) VALUES (?, 'set', ?, 'payee', ?)",
-                    params![
-                        source_id,
-                        source_id,
-                        serde_json::to_string(&resolved_payee)?
-                    ],
+                let resolution = resolver.resolve(&PayeeQuery {
+                    imported_payee: imported_payee.clone(),
+                });
+                if let Some(resolved_payee) = resolution.resolved_payee {
+                    if resolved_payee != *imported_payee {
+                        tx.execute(
+                            "INSERT INTO transactions_changes (
+                                source_id, operation, target_id, field, value_json
+                             ) VALUES (?, 'set', ?, 'payee', ?)",
+                            params![
+                                source_id,
+                                source_id,
+                                serde_json::to_string(&resolved_payee)?
+                            ],
+                        )?;
+                        resolved_payees.push(ResolvedPayee {
+                            imported_payee: imported_payee.clone(),
+                            resolved_payee: resolved_payee.clone(),
+                        });
+                    }
+                    insert_transaction_log(
+                        &tx,
+                        &source_id,
+                        &format!(
+                            "Payee: {} -> {} ({})",
+                            imported_payee, resolved_payee, resolution.reason
+                        ),
+                    )?;
+                } else {
+                    unresolved_payees.push(UnresolvedPayee {
+                        source_id: source_id.clone(),
+                        imported_payee: imported_payee.clone(),
+                        potential_payee: resolution.potential_payee,
+                        amount_direction: if transaction.amount > 0 {
+                            "inflow"
+                        } else if transaction.amount < 0 {
+                            "outflow"
+                        } else {
+                            "zero"
+                        }
+                        .into(),
+                        local_reason: resolution.reason,
+                    });
+                }
+            } else if is_new && let Some(imported_payee) = transaction.payee.as_ref() {
+                insert_transaction_log(
+                    &tx,
+                    &source_id,
+                    &format!("Payee: accepted clean imported value {imported_payee}"),
                 )?;
-                matched_payees += 1;
+            } else if is_new {
+                insert_transaction_log(&tx, &source_id, "Payee: no imported payee")?;
             }
             rebuild_projection(&tx, &source_id)?;
+            processed_source_ids.push(source_id.clone());
             if is_new {
                 new_source_ids.push(source_id);
             }
         }
+        tx.commit()?;
+        Ok(SyncBatchResult {
+            transactions: items.len(),
+            deleted_pending: 0,
+            processed_source_ids,
+            new_source_ids,
+            resolved_payees,
+            unresolved_payees,
+        })
+    }
 
-        let pending_sources = {
-            let mut statement = tx.prepare(
-                "SELECT id, external_transaction_id
-                 FROM transactions_source
-                 WHERE account_id = ? AND source = ? AND pending = 1",
-            )?;
-            let rows = statement.query_map(params![account.id, IMPORT_SOURCE_ID], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?;
-            rows.collect::<Result<Vec<_>, _>>()?
-        };
-        let mut deleted_pending = 0;
-        for (source_id, external_id) in pending_sources {
-            if !pending_ids.contains(external_id.as_str()) {
-                tx.execute("DELETE FROM transactions_source WHERE id = ?", [&source_id])?;
-                deleted_pending += 1;
+    pub fn cleanup_pending_transactions(
+        &mut self,
+        accounts: &[(&AccountRecord, &[String])],
+    ) -> Result<usize, DatabaseError> {
+        let tx = self.connection.transaction()?;
+        let mut deleted = 0;
+        for (account, pending_ids) in accounts {
+            ensure_account(&tx, &account.id)?;
+            let pending_ids = pending_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<HashSet<_>>();
+            let pending_sources = {
+                let mut statement = tx.prepare(
+                    "SELECT id, external_transaction_id
+                     FROM transactions_source
+                     WHERE account_id = ? AND source = ? AND pending = 1",
+                )?;
+                let rows = statement.query_map(params![account.id, IMPORT_SOURCE_ID], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?;
+                rows.collect::<Result<Vec<_>, _>>()?
+            };
+            for (source_id, external_id) in pending_sources {
+                if !pending_ids.contains(external_id.as_str()) {
+                    tx.execute("DELETE FROM transactions_source WHERE id = ?", [&source_id])?;
+                    deleted += 1;
+                }
             }
         }
         tx.commit()?;
-        Ok((
-            imported.transactions.len(),
-            deleted_pending,
-            new_source_ids,
-            matched_payees,
-        ))
+        Ok(deleted)
     }
 
     pub fn account_sync_start_date(&self, account_id: &str) -> Result<String, DatabaseError> {
@@ -510,6 +612,11 @@ impl Database {
         ensure_source(&tx, source_id)?;
         for change in changes {
             let (operation, target_id, field, value_json) = encode_change(&change)?;
+            let target_id = if operation == "log" {
+                source_id
+            } else {
+                target_id
+            };
             tx.execute(
                 "INSERT INTO transactions_changes (
                     source_id, operation, target_id, field, value_json
@@ -520,6 +627,60 @@ impl Database {
         rebuild_projection(&tx, source_id)?;
         tx.commit()?;
         self.get_source(source_id)
+    }
+
+    pub fn append_payee_resolutions(
+        &mut self,
+        resolutions: &[(String, String)],
+    ) -> Result<usize, DatabaseError> {
+        if resolutions.is_empty() {
+            return Ok(0);
+        }
+        let tx = self.connection.transaction()?;
+        for (source_id, _) in resolutions {
+            ensure_source(&tx, source_id)?;
+        }
+        for (source_id, payee) in resolutions {
+            tx.execute(
+                "INSERT INTO transactions_changes (
+                    source_id, operation, target_id, field, value_json
+                 ) VALUES (?, 'set', ?, 'payee', ?)",
+                params![source_id, source_id, serde_json::to_string(payee)?],
+            )?;
+            rebuild_projection(&tx, source_id)?;
+        }
+        tx.commit()?;
+        Ok(resolutions.len())
+    }
+
+    pub fn append_transaction_logs(
+        &mut self,
+        logs: &[(String, String)],
+    ) -> Result<usize, DatabaseError> {
+        if logs.is_empty() {
+            return Ok(0);
+        }
+        let tx = self.connection.transaction()?;
+        for (source_id, message) in logs {
+            ensure_source(&tx, source_id)?;
+            if message.trim().is_empty() {
+                return Err(ModelError::InvalidValue {
+                    field: "log".into(),
+                    expected: "a non-empty message",
+                }
+                .into());
+            }
+        }
+        for (source_id, message) in logs {
+            tx.execute(
+                "INSERT INTO transactions_changes (
+                    source_id, operation, target_id, field, value_json
+                 ) VALUES (?, 'log', ?, NULL, ?)",
+                params![source_id, source_id, serde_json::to_string(message)?],
+            )?;
+        }
+        tx.commit()?;
+        Ok(logs.len())
     }
 
     pub fn delete_pending_source(&mut self, id: &str) -> Result<(), DatabaseError> {
@@ -564,6 +725,7 @@ impl Database {
              WHERE changes.operation = 'set'
                AND changes.target_id = changes.source_id
                AND changes.field = 'payee'
+               AND source.pending = 0
                AND changes.id = (
                    SELECT MAX(latest.id)
                    FROM transactions_changes AS latest
@@ -580,7 +742,8 @@ impl Database {
                 row.get::<_, Option<String>>(1)?,
             ))
         })?;
-        rows.collect::<Result<Vec<_>, _>>()?
+        let examples = rows
+            .collect::<Result<Vec<_>, _>>()?
             .into_iter()
             .filter_map(|(imported_payee, value_json)| {
                 let imported_payee = imported_payee?;
@@ -597,17 +760,188 @@ impl Database {
                 )
             })
             .collect::<Result<Vec<_>, _>>()
-            .map(|examples| examples.into_iter().flatten().collect())
+            .map(|examples| examples.into_iter().flatten().collect())?;
+        Ok(examples)
     }
 
-    pub fn transfer_pairs_for_accounts(
+    pub fn categorization_examples(&self) -> Result<Vec<CategorizationExample>, DatabaseError> {
+        let mut statement = self.connection.prepare(
+            "SELECT posting.payee, source.category, source.date, source.amount,
+                    source_account.type, source.account_id, category_account.id
+             FROM transactions_source AS source
+             JOIN accounts AS source_account ON source_account.id = source.account_id
+             JOIN postings AS posting ON posting.source_id = source.id
+             JOIN accounts AS category_account ON category_account.id = posting.account_id
+             WHERE source.duplicate_of IS NULL
+               AND source.opening_balance = 0
+               AND source_account.type IN ('asset', 'liability')
+               AND category_account.type IN ('income', 'expense')
+               AND 1 = (
+                   SELECT COUNT(*)
+                   FROM postings AS candidate
+                   JOIN accounts AS candidate_account ON candidate_account.id = candidate.account_id
+                   WHERE candidate.source_id = source.id
+                     AND candidate_account.type IN ('income', 'expense')
+               )
+               AND 2 = (SELECT COUNT(*) FROM postings WHERE source_id = source.id)
+             ORDER BY source.date, source.id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let source_type = match row.get::<_, String>(4)?.as_str() {
+                "asset" => SourceAccountType::Asset,
+                "liability" => SourceAccountType::Liability,
+                _ => unreachable!("query filters source account types"),
+            };
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                source_type,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        })?;
+        let mut examples = rows
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter_map(
+                |(
+                    payee,
+                    imported_category,
+                    date,
+                    amount,
+                    source_account_type,
+                    source_account_id,
+                    counterpart_account_id,
+                )| {
+                    payee.map(|payee| CategorizationExample {
+                        payee,
+                        imported_category,
+                        date,
+                        amount,
+                        source_account_type,
+                        source_account_id,
+                        counterpart_account_id,
+                        transfer: false,
+                    })
+                },
+            )
+            .collect::<Vec<_>>();
+        let mut transfer_statement = self.connection.prepare(
+            "SELECT posting.payee, source.category, source.date, source.amount,
+                    source_account.type, source.account_id
+             FROM transactions_source AS source
+             JOIN accounts AS source_account ON source_account.id = source.account_id
+             JOIN postings AS posting ON posting.source_id = source.id
+             JOIN accounts AS counterpart_account ON counterpart_account.id = posting.account_id
+             WHERE source.duplicate_of IS NULL
+               AND source.opening_balance = 0
+               AND source_account.type IN ('asset', 'liability')
+               AND counterpart_account.type NOT IN ('income', 'expense')
+               AND posting.account_id != source.account_id
+               AND 2 = (SELECT COUNT(*) FROM postings WHERE source_id = source.id)
+             ORDER BY source.date, source.id",
+        )?;
+        let transfer_rows = transfer_statement.query_map([], |row| {
+            let source_type = match row.get::<_, String>(4)?.as_str() {
+                "asset" => SourceAccountType::Asset,
+                "liability" => SourceAccountType::Liability,
+                _ => unreachable!("query filters source account types"),
+            };
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                source_type,
+                row.get::<_, String>(5)?,
+            ))
+        })?;
+        examples.extend(
+            transfer_rows
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .filter_map(
+                    |(
+                        payee,
+                        imported_category,
+                        date,
+                        amount,
+                        source_account_type,
+                        source_account_id,
+                    )| {
+                        payee.map(|payee| CategorizationExample {
+                            payee,
+                            imported_category,
+                            date,
+                            amount,
+                            source_account_type,
+                            source_account_id,
+                            counterpart_account_id: String::new(),
+                            transfer: true,
+                        })
+                    },
+                ),
+        );
+        examples.sort_by(|left, right| left.date.cmp(&right.date));
+        Ok(examples)
+    }
+
+    pub fn categorization_query(
         &self,
-        account_ids: &[String],
+        source_id: &str,
+    ) -> Result<Option<CategorizationQuery>, DatabaseError> {
+        let row = self
+            .connection
+            .query_row(
+                "SELECT posting.payee, source.category, source.date, source.amount,
+                        account.type, source.account_id
+                 FROM transactions_source AS source
+                 JOIN accounts AS account ON account.id = source.account_id
+                 LEFT JOIN postings AS posting ON posting.source_id = source.id
+                 WHERE source.id = ?
+                   AND account.type IN ('asset', 'liability')
+                 LIMIT 1",
+                [source_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                    ))
+                },
+            )
+            .optional()?;
+        Ok(row.and_then(
+            |(payee, imported_category, date, amount, source_type, source_account_id)| {
+                payee.map(|payee| CategorizationQuery {
+                    payee,
+                    imported_category,
+                    date,
+                    amount,
+                    source_account_type: if source_type == "asset" {
+                        SourceAccountType::Asset
+                    } else {
+                        SourceAccountType::Liability
+                    },
+                    source_account_id,
+                })
+            },
+        ))
+    }
+
+    pub fn transfer_pairs_for_sources(
+        &self,
+        source_ids: &[String],
     ) -> Result<Vec<(SourceBundle, SourceBundle)>, DatabaseError> {
-        if account_ids.is_empty() {
+        if source_ids.is_empty() {
             return Ok(Vec::new());
         }
-        let placeholders = std::iter::repeat_n("?", account_ids.len())
+        let placeholders = std::iter::repeat_n("?", source_ids.len())
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!(
@@ -625,8 +959,8 @@ impl Database {
                AND left_source.account_id != right_source.account_id
                AND left_account.type IN ('asset', 'liability')
                AND right_account.type IN ('asset', 'liability')
-               AND (left_source.account_id IN ({placeholders})
-                    OR right_source.account_id IN ({placeholders}))
+                AND (left_source.id IN ({placeholders})
+                     OR right_source.id IN ({placeholders}))
                AND right_source.date BETWEEN date(left_source.date, '-3 days')
                                          AND date(left_source.date, '+3 days')
                AND (SELECT COUNT(*) FROM postings WHERE source_id = left_source.id) = 1
@@ -635,9 +969,9 @@ impl Database {
                       left_source.id, right_source.id"
         );
         let mut statement = self.connection.prepare(&sql)?;
-        let values = account_ids
+        let values = source_ids
             .iter()
-            .chain(account_ids.iter())
+            .chain(source_ids.iter())
             .map(|id| SqlValue::Text(id.clone()))
             .collect::<Vec<_>>();
         let rows = statement.query_map(params_from_iter(values.iter()), |row| {
@@ -822,87 +1156,70 @@ impl Database {
                 SELECT accounts.id
                 FROM descendants
                 JOIN accounts ON accounts.parent_id = descendants.id
-             ), ranked_rows AS (
-                SELECT
-                    postings.source_id,
-                    postings.id,
-                    postings.account_id,
-                    postings.date,
-                    postings.payee,
-                    postings.amount,
-                    postings.pending,
-                    postings.notes,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY postings.source_id
-                        ORDER BY
-                            CASE WHEN ?5 = 1 AND postings.account_id IS NULL THEN 0 ELSE 1 END,
-                            CASE WHEN postings.id = postings.source_id THEN 0 ELSE 1 END,
-                            postings.account_id
-                    ) AS source_rank
-                FROM postings
-                LEFT JOIN descendants ON descendants.id = postings.account_id
-                LEFT JOIN accounts AS posting_account ON posting_account.id = postings.account_id
-                WHERE (?5 = 1 OR descendants.id IS NOT NULL)
-                  AND (
-                    ?6 IS NULL
-                    OR instr(',' || ?6 || ',', ',' || posting_account.type || ',') > 0
-                  )
-                  AND (
-                    ?5 = 0
-                    OR postings.source_id IN (
-                        SELECT source_id
-                        FROM postings
-                        GROUP BY source_id
-                        HAVING SUM(amount) != 0
-                            OR SUM(CASE WHEN account_id IS NULL THEN 1 ELSE 0 END) > 0
-                    )
-                  )
-                  AND (
-                    ?2 IS NULL
-                    OR postings.date < ?2
-                    OR (postings.date = ?2 AND postings.source_id < ?3)
-                  )
-                  AND (
-                    ?7 IS NULL OR EXISTS (
-                      SELECT 1
-                      FROM postings AS search_posting
-                      JOIN transactions_source AS search_source ON search_source.id = search_posting.source_id
-                      WHERE search_posting.source_id = postings.source_id
-                        AND (
-                          lower(COALESCE(search_posting.payee, '')) LIKE ?7
-                          OR lower(COALESCE(search_source.payee, '')) LIKE ?7
-                          OR lower(COALESCE(search_posting.notes, '')) LIKE ?7
-                          OR lower(COALESCE(search_source.notes, '')) LIKE ?7
-                          OR printf('%.2f', search_posting.amount / 100.0) LIKE ?7
-                          OR printf('%.2f', ABS(search_posting.amount) / 100.0) LIKE ?7
-                        )
-                    )
-                  )
-             ), account_rows AS (
-                SELECT source_id, id, account_id, date, payee, amount, pending, notes
-                FROM ranked_rows
-                WHERE source_rank = 1
-                ORDER BY date DESC, source_id DESC
-                LIMIT ?4
              )
              SELECT
-                account_rows.source_id,
-                account_rows.id,
-                account_rows.account_id,
-                account_rows.date,
-                account_rows.payee,
-                account_rows.amount,
-                account_rows.pending,
-                account_rows.notes,
+                postings.source_id,
+                postings.id,
+                postings.account_id,
+                postings.date,
+                postings.payee,
+                postings.amount,
+                postings.pending,
+                postings.notes,
                 (SELECT COUNT(*) FROM postings AS all_postings
-                 WHERE all_postings.source_id = account_rows.source_id),
+                 WHERE all_postings.source_id = postings.source_id),
                 -(SELECT SUM(all_postings.amount) FROM postings AS all_postings
-                  WHERE all_postings.source_id = account_rows.source_id)
-             FROM account_rows
-             ORDER BY account_rows.date DESC, account_rows.source_id DESC",
+                  WHERE all_postings.source_id = postings.source_id)
+             FROM postings
+             LEFT JOIN descendants ON descendants.id = postings.account_id
+             LEFT JOIN accounts AS posting_account ON posting_account.id = postings.account_id
+             WHERE (?5 = 1 OR descendants.id IS NOT NULL)
+               AND (
+                 ?6 IS NULL
+                 OR instr(',' || ?6 || ',', ',' || posting_account.type || ',') > 0
+               )
+               AND (
+                 ?5 = 0
+                 OR postings.source_id IN (
+                     SELECT source_id
+                     FROM postings
+                     GROUP BY source_id
+                     HAVING SUM(amount) != 0
+                         OR SUM(CASE WHEN account_id IS NULL THEN 1 ELSE 0 END) > 0
+                 )
+               )
+               AND (
+                 ?2 IS NULL
+                 OR postings.date < ?2
+                 OR (postings.date = ?2 AND postings.source_id < ?3)
+                 OR (
+                   postings.date = ?2
+                   AND postings.source_id = ?3
+                   AND postings.id < ?8
+                 )
+               )
+               AND (
+                 ?7 IS NULL OR EXISTS (
+                   SELECT 1
+                   FROM postings AS search_posting
+                   JOIN transactions_source AS search_source ON search_source.id = search_posting.source_id
+                   WHERE search_posting.source_id = postings.source_id
+                     AND (
+                       lower(COALESCE(search_posting.payee, '')) LIKE ?7
+                       OR lower(COALESCE(search_source.payee, '')) LIKE ?7
+                       OR lower(COALESCE(search_posting.notes, '')) LIKE ?7
+                       OR lower(COALESCE(search_source.notes, '')) LIKE ?7
+                       OR printf('%.2f', search_posting.amount / 100.0) LIKE ?7
+                       OR printf('%.2f', ABS(search_posting.amount) / 100.0) LIKE ?7
+                     )
+                 )
+               )
+             ORDER BY postings.date DESC, postings.source_id DESC, postings.id DESC
+             LIMIT ?4",
         )?;
         let before_date = before.map(|cursor| cursor.date.as_str());
         let before_source_id = before.map(|cursor| cursor.source_id.as_str());
+        let before_posting_id = before.map(|cursor| cursor.posting_id.as_str());
         let account_types = account_types.map(|types| {
             types
                 .iter()
@@ -923,6 +1240,7 @@ impl Database {
                 unbalanced,
                 account_types,
                 search,
+                before_posting_id,
             ],
             |row| {
                 Ok(AccountTransaction {
@@ -937,6 +1255,7 @@ impl Database {
                     posting_count: row.get(8)?,
                     unallocated_amount: row.get(9)?,
                     other_postings: Vec::new(),
+                    logs: Vec::new(),
                 })
             },
         )?;
@@ -952,16 +1271,19 @@ impl Database {
             AccountCursor {
                 date: last.date.clone(),
                 source_id: last.source_id.clone(),
+                posting_id: last.posting_id.clone(),
             }
         });
 
         let other_started = Instant::now();
         if !transactions.is_empty() {
-            let indexes: HashMap<_, _> = transactions
-                .iter()
-                .enumerate()
-                .map(|(index, transaction)| (transaction.source_id.clone(), index))
-                .collect();
+            let mut indexes = HashMap::<String, Vec<usize>>::new();
+            for (index, transaction) in transactions.iter().enumerate() {
+                indexes
+                    .entry(transaction.source_id.clone())
+                    .or_default()
+                    .push(index);
+            }
             let placeholders = std::iter::repeat_n("?", transactions.len())
                 .collect::<Vec<_>>()
                 .join(",");
@@ -990,10 +1312,38 @@ impl Database {
             })?;
             for row in rows {
                 let (source_id, posting) = row?;
-                if let Some(index) = indexes.get(&source_id)
-                    && posting.posting_id != transactions[*index].posting_id
-                {
-                    transactions[*index].other_postings.push(posting);
+                if let Some(indexes) = indexes.get(&source_id) {
+                    for index in indexes {
+                        if posting.posting_id != transactions[*index].posting_id {
+                            transactions[*index].other_postings.push(posting.clone());
+                        }
+                    }
+                }
+            }
+            let log_sql = format!(
+                "SELECT source_id, value_json, created_at
+                 FROM transactions_changes
+                 WHERE operation = 'log' AND source_id IN ({placeholders})
+                 ORDER BY source_id, id"
+            );
+            let mut log_statement = self.connection.prepare(&log_sql)?;
+            let rows = log_statement.query_map(params_from_iter(values.iter()), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?;
+            for row in rows {
+                let (source_id, message, created_at) = row?;
+                if let Some(indexes) = indexes.get(&source_id) {
+                    let message: String = serde_json::from_str(&message)?;
+                    for index in indexes {
+                        transactions[*index].logs.push(TransactionLog {
+                            message: message.clone(),
+                            created_at: created_at.clone(),
+                        });
+                    }
                 }
             }
         }
@@ -1150,6 +1500,20 @@ fn upsert_source(tx: &Transaction<'_>, id: &str, input: &SourceInput) -> Result<
             input.transaction.notes,
             serde_json::to_string(&input.raw)?,
         ],
+    )?;
+    Ok(())
+}
+
+fn insert_transaction_log(
+    tx: &Transaction<'_>,
+    source_id: &str,
+    message: &str,
+) -> Result<(), DatabaseError> {
+    tx.execute(
+        "INSERT INTO transactions_changes (
+            source_id, operation, target_id, field, value_json
+         ) VALUES (?, 'log', ?, NULL, ?)",
+        params![source_id, source_id, serde_json::to_string(message)?],
     )?;
     Ok(())
 }
@@ -1477,6 +1841,16 @@ fn encode_change(change: &Change) -> Result<EncodedChange<'_>, DatabaseError> {
         ),
         Change::Split { target_id } => ("split", target_id, None, None),
         Change::RemoveSplit { target_id } => ("remove_split", target_id, None, None),
+        Change::Log { message } => {
+            if message.trim().is_empty() {
+                return Err(ModelError::InvalidValue {
+                    field: "log".into(),
+                    expected: "a non-empty message",
+                }
+                .into());
+            }
+            ("log", "", None, Some(serde_json::to_string(message)?))
+        }
     })
 }
 
@@ -1497,6 +1871,15 @@ fn decode_change(
         }),
         "split" => Ok(Change::Split { target_id }),
         "remove_split" => Ok(Change::RemoveSplit { target_id }),
+        "log" => Ok(Change::Log {
+            message: value_json
+                .map(|value| serde_json::from_str(&value))
+                .transpose()?
+                .ok_or_else(|| ModelError::InvalidValue {
+                    field: "log".into(),
+                    expected: "a message",
+                })?,
+        }),
         other => Err(ModelError::UnknownField(format!("operation:{other}")).into()),
     }
 }

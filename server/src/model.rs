@@ -200,6 +200,7 @@ pub struct ImportTransactionsInput {
     pub account_id: String,
     pub initial: bool,
     pub start_date: Option<String>,
+    pub end_date: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -302,6 +303,9 @@ pub enum Change {
     RemoveSplit {
         target_id: String,
     },
+    Log {
+        message: String,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -358,6 +362,12 @@ pub struct OtherPosting {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct TransactionLog {
+    pub message: String,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct AccountTransaction {
     pub source_id: String,
     pub posting_id: String,
@@ -370,12 +380,14 @@ pub struct AccountTransaction {
     pub posting_count: i64,
     pub unallocated_amount: i64,
     pub other_postings: Vec<OtherPosting>,
+    pub logs: Vec<TransactionLog>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AccountCursor {
     pub date: String,
     pub source_id: String,
+    pub posting_id: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -521,6 +533,7 @@ pub fn reduce(
                     .ok_or_else(|| ModelError::UnknownSplit(target_id.clone()))?;
                 splits.remove(index);
             }
+            Change::Log { .. } => {}
         }
     }
 
@@ -699,12 +712,18 @@ mod tests {
             ),
             stored(
                 2,
+                Change::Log {
+                    message: "Payee cleaned".into(),
+                },
+            ),
+            stored(
+                3,
                 Change::Split {
                     target_id: POSTING_ID.into(),
                 },
             ),
             stored(
-                3,
+                4,
                 Change::Set {
                     target_id: POSTING_ID.into(),
                     field: "account_id".into(),
@@ -712,7 +731,7 @@ mod tests {
                 },
             ),
             stored(
-                4,
+                5,
                 Change::Set {
                     target_id: POSTING_ID.into(),
                     field: "amount".into(),

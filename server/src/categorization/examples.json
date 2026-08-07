@@ -1,0 +1,45 @@
+{
+  "accounts": [
+    { "id": "dining", "name": "Expenses: Dining", "accountType": "expense" },
+    { "id": "groceries", "name": "Expenses: Groceries", "accountType": "expense" },
+    { "id": "shopping", "name": "Expenses: Shopping", "accountType": "expense" },
+    { "id": "household", "name": "Expenses: Household", "accountType": "expense" },
+    { "id": "utilities", "name": "Expenses: Utilities", "accountType": "expense" },
+    { "id": "salary", "name": "Income: Salary", "accountType": "income" }
+  ],
+  "history": [
+    { "payee": "Starbucks", "importedCategory": "coffee", "amount": -572, "sourceAccountType": "asset", "counterpartAccountId": "dining" },
+    { "payee": "Starbucks", "importedCategory": "coffee", "amount": -813, "sourceAccountType": "liability", "counterpartAccountId": "dining" },
+    { "payee": "Starbucks Coffee", "importedCategory": "dining", "amount": -445, "sourceAccountType": "asset", "counterpartAccountId": "dining" },
+    { "payee": "TST Starbucks", "importedCategory": "coffee", "amount": -1299, "sourceAccountType": "liability", "counterpartAccountId": "dining" },
+    { "payee": "Starbucks", "importedCategory": "coffee", "amount": -650, "sourceAccountType": "asset", "counterpartAccountId": "dining" },
+
+    { "payee": "Kroger", "importedCategory": "groceries", "amount": -8543, "sourceAccountType": "asset", "counterpartAccountId": "groceries" },
+    { "payee": "Kroger", "importedCategory": "groceries", "amount": -4218, "sourceAccountType": "liability", "counterpartAccountId": "groceries" },
+    { "payee": "Kroger Market", "importedCategory": "groceries", "amount": -12031, "sourceAccountType": "asset", "counterpartAccountId": "groceries" },
+    { "payee": "Kroger", "importedCategory": "groceries", "amount": -6734, "sourceAccountType": "asset", "counterpartAccountId": "groceries" },
+
+    { "payee": "Target", "importedCategory": "shopping", "amount": -4500, "sourceAccountType": "liability", "counterpartAccountId": "shopping" },
+    { "payee": "Target", "importedCategory": "shopping", "amount": -8200, "sourceAccountType": "asset", "counterpartAccountId": "shopping" },
+    { "payee": "Target", "importedCategory": "shopping", "amount": -1299, "sourceAccountType": "liability", "counterpartAccountId": "shopping" },
+    { "payee": "Target", "importedCategory": "household", "amount": -15500, "sourceAccountType": "asset", "counterpartAccountId": "household" },
+    { "payee": "Target", "importedCategory": "household", "amount": -2234, "sourceAccountType": "liability", "counterpartAccountId": "household" },
+
+    { "payee": "Dominion Energy", "importedCategory": "utilities", "amount": -14322, "sourceAccountType": "asset", "counterpartAccountId": "utilities" },
+    { "payee": "Dominion Energy", "importedCategory": "utilities", "amount": -13781, "sourceAccountType": "asset", "counterpartAccountId": "utilities" },
+    { "payee": "Dominion Energy", "importedCategory": "utilities", "amount": -15110, "sourceAccountType": "asset", "counterpartAccountId": "utilities" },
+
+    { "payee": "Acme Payroll", "importedCategory": "salary", "amount": 320000, "sourceAccountType": "asset", "counterpartAccountId": "salary" },
+    { "payee": "Acme Payroll", "importedCategory": "salary", "amount": 320000, "sourceAccountType": "asset", "counterpartAccountId": "salary" },
+    { "payee": "ACME CORP PAYROLL", "importedCategory": "salary", "amount": 325000, "sourceAccountType": "asset", "counterpartAccountId": "salary" }
+  ],
+  "evaluations": [
+    { "name": "exact recurring coffee", "payee": "Starbucks", "importedCategory": "coffee", "amount": -725, "sourceAccountType": "asset", "expectedAccountId": "dining" },
+    { "name": "no fuzzy processor matching", "payee": "TST*STARBUCKS #8842", "importedCategory": "coffee", "amount": -925, "sourceAccountType": "liability", "expectedAccountId": null },
+    { "name": "no fuzzy merchant matching", "payee": "KROGER STORE #4481", "importedCategory": "groceries", "amount": -9400, "sourceAccountType": "asset", "expectedAccountId": null },
+    { "name": "no fuzzy utility matching", "payee": "DOMINION ENERGY PAYMENT", "importedCategory": "utilities", "amount": -14900, "sourceAccountType": "asset", "expectedAccountId": null },
+    { "name": "no fuzzy payroll matching", "payee": "ACME PAYROLL DEPOSIT", "importedCategory": "salary", "amount": 320000, "sourceAccountType": "asset", "expectedAccountId": null },
+    { "name": "ambiguous multi-purpose merchant", "payee": "Target", "importedCategory": null, "amount": -5000, "sourceAccountType": "liability", "expectedAccountId": null },
+    { "name": "unknown merchant", "payee": "River City Books", "importedCategory": "books", "amount": -2500, "sourceAccountType": "liability", "expectedAccountId": null }
+  ]
+}

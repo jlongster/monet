@@ -63,6 +63,7 @@ export type ImportTransactionsRequest = {
   accountId: string
   initial: boolean
   startDate?: string
+  endDate?: string
 }
 
 export type ImportPlugin = {

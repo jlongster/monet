@@ -1,0 +1,400 @@
+{
+  "version": 1,
+  "name": "large-amount-discrepancy",
+  "command": "'cargo' 'run' '--manifest-path' 'server/Cargo.toml' '--bin' 'categorization_eval' '--' '--interactive' '--payee' 'Amazon' '--amount-profile' 'mixed' '--source-type' 'mixed' '--date-profile' 'mixed' '--steps' '20' '--seed' '40'",
+  "accounts": [
+    {
+      "id": "dining",
+      "name": "Expenses: Dining",
+      "accountType": "expense"
+    },
+    {
+      "id": "groceries",
+      "name": "Expenses: Groceries",
+      "accountType": "expense"
+    },
+    {
+      "id": "shopping",
+      "name": "Expenses: Shopping",
+      "accountType": "expense"
+    },
+    {
+      "id": "household",
+      "name": "Expenses: Household",
+      "accountType": "expense"
+    },
+    {
+      "id": "utilities",
+      "name": "Expenses: Utilities",
+      "accountType": "expense"
+    },
+    {
+      "id": "salary",
+      "name": "Income: Salary",
+      "accountType": "income"
+    }
+  ],
+  "startingHistory": [],
+  "steps": [
+    {
+      "step": 1,
+      "query": {
+        "payee": "Amazon",
+        "importedCategory": null,
+        "date": "2025-01-01",
+        "amount": -105739,
+        "sourceAccountType": "liability",
+        "sourceAccountId": "loan"
+      },
+      "decision": {
+        "action": "categorized",
+        "input": "bills",
+        "accountId": "bills",
+        "createdAccount": true
+      },
+      "suggestedCategory": null
+    },
+    {
+      "step": 2,
+      "query": {
+        "payee": "Amazon",
+        "importedCategory": null,
+        "date": "2025-01-12",
+        "amount": -104269,
+        "sourceAccountType": "liability",
+        "sourceAccountId": "loan"
+      },
+      "decision": {
+        "action": "categorized",
+        "input": "",
+        "accountId": "bills",
+        "createdAccount": false
+      },
+      "suggestedCategory": "bills"
+    },
+    {
+      "step": 3,
+      "query": {
+        "payee": "Amazon",
+        "importedCategory": null,
+        "date": "2025-01-24",
+        "amount": -114368,
+        "sourceAccountType": "asset",
+        "sourceAccountId": "savings"
+      },
+      "decision": {
+        "action": "categorized",
+        "input": "",
+        "accountId": "bills",
+        "createdAccount": false
+      },
+      "suggestedCategory": "bills"
+    },
+    {
+      "step": 4,
+      "query": {
+        "payee": "Amazon",
+        "importedCategory": null,
+        "date": "2025-02-15",
+        "amount": -108496,
+        "sourceAccountType": "liability",
+        "sourceAccountId": "credit-card"
+      },
+      "decision": {
+        "action": "categorized",
+        "input": "",
+        "accountId": "bills",
+        "createdAccount": false
+      },
+      "suggestedCategory": "bills"
+    },
+    {
+      "step": 5,
+      "query": {
+        "payee": "Amazon",
+        "importedCategory": null,
+        "date": "2025-02-22",
+        "amount": -1379,
+        "sourceAccountType": "asset",
+        "sourceAccountId": "savings"
+      },
+      "decision": {
+        "action": "categorized",
+        "input": "kids",
+        "accountId": "kids",
+        "createdAccount": true
+      },
+      "suggestedCategory": null
+    },
+    {
+      "step": 6,
+      "query": {
+        "payee": "Amazon",
+        "importedCategory": null,
+        "date": "2025-03-01",
+        "amount": -103182,
+        "sourceAccountType": "asset",
+        "sourceAccountId": "checking"
+      },
+      "decision": {
+        "action": "categorized",
+        "input": "",
+        "accountId": "bills",
+        "createdAccount": false
+      },
+      "suggestedCategory": "bills"
+    },
+    {
+      "step": 7,
+      "query": {
+        "payee": "Amazon",
+        "importedCategory": null,
+        "date": "2025-03-10",
+        "amount": -1073,
+        "sourceAccountType": "liability",
+        "sourceAccountId": "loan"
+      },
+      "decision": {
+        "action": "categorized",
+        "input": "",
+        "accountId": "kids",
+        "createdAccount": false
+      },
+      "suggestedCategory": "kids"
+    },
+    {
+      "step": 8,
+      "query": {
+        "payee": "Amazon",
+        "importedCategory": null,
+        "date": "2025-03-22",
+        "amount": -1362,
+        "sourceAccountType": "liability",
+        "sourceAccountId": "loan"
+      },
+      "decision": {
+        "action": "categorized",
+        "input": "",
+        "accountId": "kids",
+        "createdAccount": false
+      },
+      "suggestedCategory": "kids"
+    },
+    {
+      "step": 9,
+      "query": {
+        "payee": "Amazon",
+        "importedCategory": null,
+        "date": "2025-04-12",
+        "amount": -1028,
+        "sourceAccountType": "liability",
+        "sourceAccountId": "loan"
+      },
+      "decision": {
+        "action": "categorized",
+        "input": "",
+        "accountId": "kids",
+        "createdAccount": false
+      },
+      "suggestedCategory": "kids"
+    },
+    {
+      "step": 10,
+      "query": {
+        "payee": "Amazon",
+        "importedCategory": null,
+        "date": "2025-04-25",
+        "amount": -104228,
+        "sourceAccountType": "asset",
+        "sourceAccountId": "checking"
+      },
+      "decision": {
+        "action": "categorized",
+        "input": "",
+        "accountId": "bills",
+        "createdAccount": false
+      },
+      "suggestedCategory": "bills"
+    },
+    {
+      "step": 11,
+      "query": {
+        "payee": "Amazon",
+        "importedCategory": null,
+        "date": "2025-05-07",
+        "amount": -1495,
+        "sourceAccountType": "asset",
+        "sourceAccountId": "checking"
+      },
+      "decision": {
+        "action": "categorized",
+        "input": "",
+        "accountId": "kids",
+        "createdAccount": false
+      },
+      "suggestedCategory": "kids"
+    },
+    {
+      "step": 12,
+      "query": {
+        "payee": "Amazon",
+        "importedCategory": null,
+        "date": "2025-05-24",
+        "amount": -1027,
+        "sourceAccountType": "asset",
+        "sourceAccountId": "savings"
+      },
+      "decision": {
+        "action": "categorized",
+        "input": "",
+        "accountId": "kids",
+        "createdAccount": false
+      },
+      "suggestedCategory": "kids"
+    },
+    {
+      "step": 13,
+      "query": {
+        "payee": "Amazon",
+        "importedCategory": null,
+        "date": "2025-06-21",
+        "amount": -101340,
+        "sourceAccountType": "liability",
+        "sourceAccountId": "loan"
+      },
+      "decision": {
+        "action": "categorized",
+        "input": "",
+        "accountId": "bills",
+        "createdAccount": false
+      },
+      "suggestedCategory": "bills"
+    },
+    {
+      "step": 14,
+      "query": {
+        "payee": "Amazon",
+        "importedCategory": null,
+        "date": "2025-07-06",
+        "amount": -1287,
+        "sourceAccountType": "asset",
+        "sourceAccountId": "savings"
+      },
+      "decision": {
+        "action": "categorized",
+        "input": "",
+        "accountId": "kids",
+        "createdAccount": false
+      },
+      "suggestedCategory": "kids"
+    },
+    {
+      "step": 15,
+      "query": {
+        "payee": "Amazon",
+        "importedCategory": null,
+        "date": "2025-07-17",
+        "amount": -1219,
+        "sourceAccountType": "liability",
+        "sourceAccountId": "loan"
+      },
+      "decision": {
+        "action": "categorized",
+        "input": "",
+        "accountId": "kids",
+        "createdAccount": false
+      },
+      "suggestedCategory": "kids"
+    },
+    {
+      "step": 16,
+      "query": {
+        "payee": "Amazon",
+        "importedCategory": null,
+        "date": "2025-07-29",
+        "amount": -1206,
+        "sourceAccountType": "liability",
+        "sourceAccountId": "credit-card"
+      },
+      "decision": {
+        "action": "categorized",
+        "input": "",
+        "accountId": "kids",
+        "createdAccount": false
+      },
+      "suggestedCategory": "kids"
+    },
+    {
+      "step": 17,
+      "query": {
+        "payee": "Amazon",
+        "importedCategory": null,
+        "date": "2025-08-12",
+        "amount": -112247,
+        "sourceAccountType": "liability",
+        "sourceAccountId": "loan"
+      },
+      "decision": {
+        "action": "categorized",
+        "input": "",
+        "accountId": "bills",
+        "createdAccount": false
+      },
+      "suggestedCategory": "bills"
+    },
+    {
+      "step": 18,
+      "query": {
+        "payee": "Amazon",
+        "importedCategory": null,
+        "date": "2025-08-28",
+        "amount": -1290,
+        "sourceAccountType": "liability",
+        "sourceAccountId": "loan"
+      },
+      "decision": {
+        "action": "categorized",
+        "input": "",
+        "accountId": "kids",
+        "createdAccount": false
+      },
+      "suggestedCategory": "kids"
+    },
+    {
+      "step": 19,
+      "query": {
+        "payee": "Amazon",
+        "importedCategory": null,
+        "date": "2025-09-17",
+        "amount": -1406,
+        "sourceAccountType": "asset",
+        "sourceAccountId": "savings"
+      },
+      "decision": {
+        "action": "categorized",
+        "input": "",
+        "accountId": "kids",
+        "createdAccount": false
+      },
+      "suggestedCategory": "kids"
+    },
+    {
+      "step": 20,
+      "query": {
+        "payee": "Amazon",
+        "importedCategory": null,
+        "date": "2025-10-14",
+        "amount": -116178,
+        "sourceAccountType": "liability",
+        "sourceAccountId": "credit-card"
+      },
+      "decision": {
+        "action": "categorized",
+        "input": "",
+        "accountId": "bills",
+        "createdAccount": false
+      },
+      "suggestedCategory": "bills"
+    }
+  ]
+}

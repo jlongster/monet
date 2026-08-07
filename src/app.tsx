@@ -1,5 +1,5 @@
 import { RegistryContext, useAtomValue } from "@effect-atom/atom-react"
-import type { Renderable, ScrollBoxRenderable, TextareaRenderable, TextRenderable } from "@opentui/core"
+import type { BoxRenderable, Renderable, ScrollBoxRenderable, TextareaRenderable, TextRenderable } from "@opentui/core"
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react"
 import { useContext, useEffect, useRef, useState } from "react"
 import stringWidth from "string-width"
@@ -21,6 +21,7 @@ import {
   choosePosting,
   collapsedAccountIdsAtom,
   createAccount,
+  createDebugCategories,
   deleteAccount,
   creationParentsAtom,
   financialAccountsAtom,
@@ -33,6 +34,7 @@ import {
   selectTransaction,
   setAccountCollapsed,
   setAccountView,
+  setInlineCounterpart,
   setTransactionSearch,
   selectedAccountAtom,
   selectedTransactionAtom,
@@ -47,10 +49,11 @@ import {
   transactionSearchAtom,
 } from "./store"
 import { FilterSelect, type FilterSelectOption } from "./filter-select"
+import { DebugSync } from "./debug-sync"
 import { moveOrderedFocus } from "./focus-order"
 import { FormButton, FormField } from "./form"
 import { PluginsSettings } from "./plugins-settings"
-import { PopoverProvider } from "./popover"
+import { Popover, PopoverProvider } from "./popover"
 import { scrollTopForRange } from "./selection-scroll"
 import { gray, selectionBackground } from "./theme"
 
@@ -213,7 +216,7 @@ export function App() {
   const [openCreationSelect, setOpenCreationSelect] = useState<"parent" | "type" | null>(null)
   const [deletingAccount, setDeletingAccount] = useState<Account | null>(null)
   const [deletionChoice, setDeletionChoice] = useState<0 | 1>(0)
-  const [screen, setScreen] = useState<"ledger" | "plugins">("ledger")
+  const [screen, setScreen] = useState<"ledger" | "plugins" | "debug-sync">("ledger")
   const [transactionDraft, setTransactionDraft] = useState<TransactionDraft | null>(null)
   const [transactionEditorOpen, setTransactionEditorOpen] = useState(false)
   const [transactionEditing, setTransactionEditing] = useState(false)
@@ -230,7 +233,14 @@ export function App() {
   const [searchDraft, setSearchDraft] = useState(transactionSearch)
   const [searchFocused, setSearchFocused] = useState(false)
   const [syncLogOpen, setSyncLogOpen] = useState(false)
+  const [syncOptionsOpen, setSyncOptionsOpen] = useState(false)
+  const [syncEndDate, setSyncEndDate] = useState(new Date().toISOString().slice(0, 10))
+  const [syncDateError, setSyncDateError] = useState<string | null>(null)
   const syncLogRef = useRef<ScrollBoxRenderable>(null)
+  const counterpartAnchorRef = useRef<BoxRenderable>(null)
+  const [counterpartPickerOpen, setCounterpartPickerOpen] = useState(false)
+  const [counterpartFilter, setCounterpartFilter] = useState("")
+  const [counterpartHighlight, setCounterpartHighlight] = useState(0)
   const [notesHeight, setNotesHeight] = useState(3)
   const notesMeasureCallback = useRef<(() => void) | null>(null)
   const showAccountSidebar = terminalWidth >= ACCOUNT_SIDEBAR_WIDTH +
@@ -254,8 +264,59 @@ export function App() {
       ? accountSubtree(state.accounts, editingAccount.id).map((account) => account.id)
       : [],
   )
+  const openSyncOptions = () => {
+    if (state.busy || syncLog.running) return
+    setSyncEndDate(new Date().toISOString().slice(0, 10))
+    setSyncDateError(null)
+    setSyncOptionsOpen(true)
+  }
+  const runConfiguredSync = () => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(syncEndDate)) {
+      setSyncDateError("Use YYYY-MM-DD")
+      return
+    }
+    setSyncOptionsOpen(false)
+    sync(registry, { endDate: syncEndDate })
+  }
+  const openCounterpartPicker = () => {
+    if (
+      !selectedTransaction ||
+      state.busy ||
+      transactionEditorOpen ||
+      selectedTransaction.other_postings.length > 1 ||
+      !showTransactionCounterpartColumn
+    ) return
+    const current = selectedTransaction.other_postings[0]?.account_id
+    setCounterpartFilter("")
+    setCounterpartHighlight(Math.max(
+      0,
+      assignmentAccounts.findIndex((account) => account.id === current),
+    ))
+    setCounterpartPickerOpen(true)
+  }
+  const selectInlineCounterpart = (accountId: string) => {
+    setCounterpartPickerOpen(false)
+    setInlineCounterpart(registry, accountId)
+  }
   const assignmentTree = assignmentAccounts
   const selectedAssignment = assignmentAccounts[state.selectedAssignmentIndex] ?? null
+  const normalizedCounterpartFilter = counterpartFilter.trim().toLocaleLowerCase()
+  const counterpartOptions = assignmentAccounts.filter((account) =>
+    !normalizedCounterpartFilter ||
+    `${account.name} ${account.type}`.toLocaleLowerCase().includes(normalizedCounterpartFilter)
+  )
+  const counterpartVisibleCount = Math.min(10, Math.max(1, counterpartOptions.length))
+  const counterpartVisibleStart = Math.max(
+    0,
+    Math.min(
+      counterpartHighlight - Math.floor(counterpartVisibleCount / 2),
+      counterpartOptions.length - counterpartVisibleCount,
+    ),
+  )
+  const visibleCounterpartOptions = counterpartOptions.slice(
+    counterpartVisibleStart,
+    counterpartVisibleStart + counterpartVisibleCount,
+  )
   const editingPosting = selectedTransaction?.other_postings.find(
     (posting) => posting.posting_id === state.editingPostingId,
   )
@@ -298,11 +359,14 @@ export function App() {
         })),
       ]
     : []
-  const selectedSourcePosting = selectedTransaction
+  const selectedCanonicalPosting = selectedTransaction
     ? selectedPostings.find((posting) => posting.postingId === selectedTransaction.source_id) ?? null
     : null
+  const selectedViewPosting = selectedTransaction
+    ? selectedPostings.find((posting) => posting.postingId === selectedTransaction.posting_id) ?? null
+    : null
   const selectedCounterparts = selectedTransaction
-    ? selectedPostings.filter((posting) => posting.postingId !== selectedTransaction.source_id)
+    ? selectedPostings.filter((posting) => posting.postingId !== selectedTransaction.posting_id)
     : []
   const splitCounterpartAmountWidth = selectedCounterparts.reduce(
     (width, posting) => Math.max(width, stringWidth(money(posting.amount))),
@@ -314,8 +378,8 @@ export function App() {
       ? ["notes", "split", "save", "cancel"]
       : ["notes", "counterpart", "split", "save", "cancel"]
     : ["register", "edit"]
-  const editorSourceAccountId = transactionDraft?.sourceAccountId ?? selectedSourcePosting?.accountId ?? null
-  const editorSourceAmount = transactionDraft?.sourceAmount ?? selectedSourcePosting?.amount ?? 0
+  const editorSourceAccountId = transactionDraft?.sourceAccountId ?? selectedViewPosting?.accountId ?? null
+  const editorSourceAmount = transactionDraft?.sourceAmount ?? selectedViewPosting?.amount ?? 0
   const transactionEditorFields = transactionDraft
     ? [
         "notes",
@@ -348,7 +412,7 @@ export function App() {
         accountId: posting.account_id,
       })),
     ]
-    const counterparts = postings.filter((posting) => posting.postingId !== transaction.source_id)
+    const counterparts = postings.filter((posting) => posting.postingId !== transaction.posting_id)
     setNormalEditorSourceId(transaction.source_id)
     setNormalNotes(transaction.notes ?? "")
     setNormalCounterpartAccountId(
@@ -397,7 +461,7 @@ export function App() {
   }
 
   const saveTransactionEditMode = () => {
-    if (!selectedTransaction || !selectedSourcePosting) return
+    if (!selectedTransaction || !selectedCanonicalPosting || !selectedViewPosting) return
     const changes: TransactionChange[] = [{
       operation: "set" as const,
       target_id: selectedTransaction.source_id,
@@ -411,27 +475,39 @@ export function App() {
       (selectedCounterparts.length <= 1 || collapseSplitsToSingle) &&
       (collapseSplitsToSingle || normalCounterpartAccountId !== originalCounterpartAccountId)
     ) {
-      changes.push(...selectedCounterparts.map((posting) => ({
-        operation: "remove_split" as const,
-        target_id: posting.postingId,
-      })))
-      if (normalCounterpartAccountId !== NO_ACCOUNT) {
-        const postingId = crypto.randomUUID()
-        changes.push(
-          { operation: "split" as const, target_id: postingId },
-          {
-            operation: "set" as const,
-            target_id: postingId,
-            field: "account_id" as const,
-            value: normalCounterpartAccountId,
-          },
-          {
-            operation: "set" as const,
-            target_id: postingId,
-            field: "amount" as const,
-            value: -selectedSourcePosting.amount,
-          },
-        )
+      if (selectedTransaction.posting_id === selectedTransaction.source_id) {
+        changes.push(...selectedCounterparts.map((posting) => ({
+          operation: "remove_split" as const,
+          target_id: posting.postingId,
+        })))
+        if (normalCounterpartAccountId !== NO_ACCOUNT) {
+          const postingId = crypto.randomUUID()
+          changes.push(
+            { operation: "split" as const, target_id: postingId },
+            {
+              operation: "set" as const,
+              target_id: postingId,
+              field: "account_id" as const,
+              value: normalCounterpartAccountId,
+            },
+            {
+              operation: "set" as const,
+              target_id: postingId,
+              field: "amount" as const,
+              value: -selectedCanonicalPosting.amount,
+            },
+          )
+        }
+      } else if (
+        selectedCounterparts.length === 1 &&
+        selectedCounterparts[0]?.postingId === selectedTransaction.source_id
+      ) {
+        changes.push({
+          operation: "set" as const,
+          target_id: selectedTransaction.source_id,
+          field: "account_id" as const,
+          value: normalCounterpartAccountId === NO_ACCOUNT ? null : normalCounterpartAccountId,
+        })
       }
     }
     saveTransactionChanges(registry, selectedTransaction.source_id, changes, () => {
@@ -465,7 +541,7 @@ export function App() {
   }
 
   const beginTransactionEditing = () => {
-    if (!selectedTransaction) return
+    if (!selectedTransaction || !selectedCanonicalPosting) return
     const currentPosting = {
       postingId: selectedTransaction.posting_id,
       accountId: selectedTransaction.account_id,
@@ -477,8 +553,7 @@ export function App() {
       amount: posting.amount,
     }))
     const postings = [currentPosting, ...otherPostings]
-    const sourcePosting = postings.find((posting) => posting.postingId === selectedTransaction.source_id)
-    if (!sourcePosting) return
+    const sourcePosting = selectedCanonicalPosting
     let allocations: AllocationDraft[] = postings
       .filter((posting) => posting.postingId !== selectedTransaction.source_id)
       .map((posting) => ({
@@ -651,7 +726,7 @@ export function App() {
   }, [registry, showAccountSidebar, state.focus])
 
   useEffect(() => {
-    if (syncLogOpen || deletingAccount || state.creatingAccount || state.assigning || transactionEditing || transactionDraft) {
+    if (syncLogOpen || syncOptionsOpen || deletingAccount || state.creatingAccount || state.assigning || transactionEditing || transactionDraft) {
       accountListRef.current?.blur()
       transactionListRef.current?.blur()
       return
@@ -673,6 +748,7 @@ export function App() {
     state.creatingAccount,
     state.focus,
     syncLogOpen,
+    syncOptionsOpen,
     transactionDraft,
     transactionEditing,
     transactionEditorOpen,
@@ -682,6 +758,28 @@ export function App() {
     if (!syncLogOpen) return
     syncLogRef.current?.scrollTo(Math.max(0, syncLog.lines.length - 1))
   }, [syncLog.lines.length, syncLogOpen])
+
+  useEffect(() => {
+    setCounterpartPickerOpen(false)
+  }, [selectedTransaction?.posting_id])
+
+  useEffect(() => {
+    setCounterpartHighlight((index) => Math.min(index, Math.max(0, counterpartOptions.length - 1)))
+  }, [counterpartOptions.length, counterpartFilter])
+
+  useEffect(() => {
+    if (!counterpartPickerOpen) return
+    const initialScrollTop = transactionListRef.current?.scrollTop
+    const closeOnScroll = () => {
+      if (transactionListRef.current?.scrollTop !== initialScrollTop) {
+        setCounterpartPickerOpen(false)
+      }
+    }
+    renderer.on("frame", closeOnScroll)
+    return () => {
+      renderer.off("frame", closeOnScroll)
+    }
+  }, [counterpartPickerOpen, renderer])
 
   useEffect(() => {
     if (!state.trace) return
@@ -759,17 +857,60 @@ export function App() {
   useKeyboard((key) => {
     const tabPressed = key.name === "tab" || key.name === "shift-tab"
     const reverseTab = key.shift || key.name === "shift-tab"
+    if (syncOptionsOpen) {
+      if (key.name === "escape") {
+        key.preventDefault()
+        key.stopPropagation()
+        setSyncOptionsOpen(false)
+      }
+      return
+    }
     if (syncLogOpen) {
       if (key.name === "escape" || key.name === "return" || key.name === "enter") {
+        key.preventDefault()
+        key.stopPropagation()
         setSyncLogOpen(false)
       }
       return
     }
-    if (screen === "plugins") return
+    if (counterpartPickerOpen) {
+      if (["escape", "up", "down", "return", "enter"].includes(key.name)) {
+        key.preventDefault()
+        key.stopPropagation()
+      }
+      if (key.name === "escape") setCounterpartPickerOpen(false)
+      if (key.name === "up" && counterpartOptions.length > 0) {
+        setCounterpartHighlight((index) => Math.max(0, index - 1))
+      }
+      if (key.name === "down" && counterpartOptions.length > 0) {
+        setCounterpartHighlight((index) => Math.min(counterpartOptions.length - 1, index + 1))
+      }
+      if (key.name === "return" || key.name === "enter") {
+        const account = counterpartOptions[counterpartHighlight]
+        if (account) selectInlineCounterpart(account.id)
+      }
+      return
+    }
+    if (
+      key.name === "s" &&
+      !transactionEditing &&
+      !transactionDraft &&
+      !state.creatingAccount &&
+      !state.assigning &&
+      !deletingAccount
+    ) {
+      openSyncOptions()
+      return
+    }
+    if (screen !== "ledger") return
     if (searchFocused) {
       if (key.name === "escape" || key.name === "return" || key.name === "enter") {
         setSearchFocused(false)
       }
+      return
+    }
+    if (key.name === "c" && state.focus === "transactions") {
+      openCounterpartPicker()
       return
     }
     if (transactionDraft) {
@@ -962,7 +1103,6 @@ export function App() {
       }
       else if (state.focus === "transactions") openTransactionEditor()
     }
-    if (key.name === "s") sync(registry)
     if (key.name === "r") refresh(registry)
   })
 
@@ -1081,16 +1221,28 @@ export function App() {
           >
             <text fg={screen === "plugins" ? gray[100] : gray[500]}>Plugins</text>
           </box>
+          <box
+            id="screen-debug-sync"
+            style={{
+              height: 1,
+              paddingLeft: 1,
+              paddingRight: 1,
+              backgroundColor: screen === "debug-sync" ? selectionBackground : gray[800],
+            }}
+            onMouseDown={transactionEditing || transactionDraft ? undefined : () => setScreen("debug-sync")}
+          >
+            <text fg={screen === "debug-sync" ? gray[100] : gray[500]}>Debug Sync</text>
+          </box>
         </box>
         <box style={{ flexDirection: "row", gap: 2 }}>
           <text
             id="sync-status"
-            fg={state.error ? gray[300] : state.busy ? gray[400] : gray[500]}
+            fg={state.error ? gray[300] : state.busy || syncLog.running ? gray[400] : gray[500]}
             onMouseDown={syncLog.lines.length > 0 ? () => setSyncLogOpen(true) : undefined}
           >
-            {state.error ?? state.message}
+            {state.error ?? (syncLog.running ? "Syncing in background" : state.message)}
           </text>
-          <text id="sync-all" fg={state.busy ? gray[600] : gray[200]} onMouseDown={transactionEditing || transactionDraft || state.busy ? undefined : () => sync(registry)}>
+          <text id="sync-all" fg={state.busy || syncLog.running ? gray[600] : gray[200]} onMouseDown={transactionEditing || transactionDraft || state.busy || syncLog.running ? undefined : openSyncOptions}>
             [s] sync
           </text>
         </box>
@@ -1099,6 +1251,8 @@ export function App() {
       <box style={{ flexGrow: 1, flexDirection: "row-reverse" }}>
         {screen === "plugins" ? (
           <PluginsSettings />
+        ) : screen === "debug-sync" ? (
+          <DebugSync onSync={openSyncOptions} />
         ) : (
         <>
         {transactionEditorOpen ? (
@@ -1340,7 +1494,7 @@ export function App() {
                         options={[
                           { value: NO_ACCOUNT, label: "None", detail: "unassigned" },
                           ...creationParents
-                            .filter((account) => account.id !== selectedSourcePosting?.accountId)
+                            .filter((account) => account.id !== selectedViewPosting?.accountId)
                             .map((account) => ({
                               value: account.id,
                               label: account.name,
@@ -1399,6 +1553,19 @@ export function App() {
                       {selectedTransaction?.notes || "None"}
                     </text>
                   </box>
+                  {selectedTransaction?.logs?.length ? (
+                    <>
+                      <box style={{ height: 1 }} />
+                      <box style={{ width: "100%", flexDirection: "column" }}>
+                        <text fg={gray[500]}>Activity</text>
+                        {(selectedTransaction.logs ?? []).map((log, index) => (
+                          <text key={`${log.created_at}-${index}`} fg={gray[400]} wrapMode="word">
+                            - {log.message}
+                          </text>
+                        ))}
+                      </box>
+                    </>
+                  ) : null}
                   <box style={{ height: 1 }} />
                   {selectedCounterparts.length > 1 ? (
                     <box style={{ width: "100%", flexDirection: "column" }}>
@@ -1818,8 +1985,8 @@ export function App() {
                   const selected = state.focus === "transactions" && index === state.selectedTransactionIndex
                   return (
                     <box
-                      key={transaction.source_id}
-                      id={`transaction-${transaction.source_id}`}
+                      key={`${transaction.source_id}-${transaction.posting_id}`}
+                      id={`transaction-${transaction.source_id}-${transaction.posting_id}`}
                       style={{
                         width: "100%",
                         height: 1,
@@ -1856,12 +2023,15 @@ export function App() {
                         </text>
                       ) : null}
                       {showTransactionCounterpartColumn ? (
-                        <text
-                          fg={other ? gray[200] : gray[600]}
-                          style={{ width: showTransactionAccountColumn ? 13 : 15 }}
+                        <box
+                          ref={selected ? counterpartAnchorRef : undefined}
+                          style={{ width: showTransactionAccountColumn ? 13 : 15, height: 1 }}
+                          onMouseDown={selected ? openCounterpartPicker : undefined}
                         >
-                          {short(otherLabel, showTransactionAccountColumn ? 12 : 14)}
-                        </text>
+                          <text fg={other ? gray[200] : gray[600]}>
+                            {short(otherLabel, showTransactionAccountColumn ? 12 : 14)}
+                          </text>
+                        </box>
                       ) : null}
                       <box style={{ width: 12, height: 1, flexDirection: "row", justifyContent: "flex-end" }}>
                         <text fg={transaction.amount < 0 ? gray[300] : gray[200]}>
@@ -1872,6 +2042,64 @@ export function App() {
                   )
                 })}
               </scrollbox>
+              <Popover
+                open={counterpartPickerOpen}
+                anchorRef={counterpartAnchorRef}
+                height={counterpartVisibleCount + 1}
+                width={30}
+                align="right"
+                anchorMode="overlay"
+              >
+                <box
+                  style={{
+                    width: "100%",
+                    height: counterpartVisibleCount + 1,
+                    flexDirection: "column",
+                    backgroundColor: gray[800],
+                  }}
+                >
+                  <input
+                    id="inline-counterpart-filter"
+                    focused
+                    value={counterpartFilter}
+                    placeholder="Filter counterparts"
+                    textColor={gray[100]}
+                    focusedTextColor={gray[100]}
+                    backgroundColor={gray[700]}
+                    focusedBackgroundColor={gray[700]}
+                    cursorColor={gray[200]}
+                    style={{ width: "100%" }}
+                    onInput={(value) => {
+                      setCounterpartFilter(value)
+                      setCounterpartHighlight(0)
+                    }}
+                  />
+                  {visibleCounterpartOptions.length === 0 ? (
+                    <text fg={gray[600]}>No matches</text>
+                  ) : visibleCounterpartOptions.map((account, visibleIndex) => {
+                    const index = counterpartVisibleStart + visibleIndex
+                    const highlighted = index === counterpartHighlight
+                    return (
+                      <box
+                        key={account.id}
+                        id={`inline-counterpart-${account.id}`}
+                        style={{
+                          height: 1,
+                          flexDirection: "row",
+                          justifyContent: "space-between",
+                          backgroundColor: highlighted ? gray[700] : gray[800],
+                        }}
+                        onMouseDown={() => selectInlineCounterpart(account.id)}
+                      >
+                        <text fg={highlighted ? gray[100] : gray[300]}>
+                          {`${"  ".repeat(account.depth)}${account.name}`}
+                        </text>
+                        <text fg={gray[600]}>{account.type}</text>
+                      </box>
+                    )
+                  })}
+                </box>
+              </Popover>
             </box>
           )}
         </box>
@@ -1880,18 +2108,83 @@ export function App() {
         )}
       </box>
 
+      {syncOptionsOpen ? (
+        <box
+          style={{
+            position: "absolute",
+            top: 0,
+            left: 0,
+            width: "100%",
+            height: "100%",
+            zIndex: 2100,
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <box
+            title=" Sync options "
+            style={{
+              width: 42,
+              border: true,
+              borderColor: gray[600],
+              backgroundColor: gray[900],
+              flexDirection: "column",
+              padding: 1,
+              gap: 1,
+            }}
+          >
+            <text fg={gray[500]}>Imports from January 1 through this date.</text>
+            <FormField label="Through date" focused>
+              <input
+                id="sync-through-date"
+                focused
+                value={syncEndDate}
+                placeholder="YYYY-MM-DD"
+                textColor={gray[100]}
+                focusedTextColor={gray[100]}
+                backgroundColor={gray[800]}
+                focusedBackgroundColor={gray[700]}
+                cursorColor={gray[200]}
+                style={{ width: "100%", paddingLeft: 1, paddingRight: 1 }}
+                onInput={(value) => {
+                  setSyncEndDate(value)
+                  setSyncDateError(null)
+                }}
+                onSubmit={runConfiguredSync}
+              />
+            </FormField>
+            {syncDateError ? <text fg={gray[300]} style={{ marginLeft: 1 }}>{syncDateError}</text> : null}
+            <FormButton
+              id="sync-create-categories"
+              label="Add income & expense accounts"
+              focused={false}
+              disabled={state.busy}
+              onPress={() => createDebugCategories(registry)}
+            />
+            <box style={{ width: "100%", flexDirection: "row", gap: 1 }}>
+              <box style={{ width: "50%" }}>
+                <FormButton label="Cancel" focused={false} onPress={() => setSyncOptionsOpen(false)} />
+              </box>
+              <box style={{ width: "50%" }}>
+                <FormButton label="Sync" focused={false} disabled={state.busy} onPress={runConfiguredSync} />
+              </box>
+            </box>
+            <text fg={gray[600]}>enter sync   esc cancel</text>
+          </box>
+        </box>
+      ) : null}
+
       {syncLogOpen ? (
         <box
           style={{
             position: "absolute",
-            top: 1,
+            top: 0,
             left: 0,
             width: "100%",
             height: "100%",
             zIndex: 2000,
             alignItems: "center",
             justifyContent: "center",
-            backgroundColor: gray[900],
           }}
         >
           <box
@@ -1918,7 +2211,6 @@ export function App() {
               scrollY
               style={{
                 flexGrow: 1,
-                flexDirection: "column",
                 verticalScrollbarOptions: { visible: true },
               }}
             >
@@ -1928,7 +2220,18 @@ export function App() {
                 </text>
               ))}
             </scrollbox>
-            <text fg={gray[600]}>esc/enter close</text>
+            <box style={{ height: 1, flexDirection: "row", justifyContent: "space-between" }}>
+              <text fg={gray[600]}>
+                {syncLog.running ? "sync continues in background" : "sync complete"}
+              </text>
+              <text
+                id="sync-log-close"
+                fg={gray[300]}
+                onMouseDown={() => setSyncLogOpen(false)}
+              >
+                [close] esc/enter
+              </text>
+            </box>
           </box>
         </box>
       ) : null}
@@ -1945,13 +2248,15 @@ export function App() {
         <text fg={gray[600]}>
           {screen === "plugins"
             ? "plugin settings"
+            : screen === "debug-sync"
+              ? "tab field   space toggle   enter activate"
             : transactionEditing
               ? "transaction editor   tab field   esc read-only"
             : transactionEditorOpen
               ? "tab field   ↑/↓ move transactions when register is focused   esc close"
               : `${showAccountSidebar ? "tab pane   " : ""}↑/↓ move   a new   e edit   ${showAccountSidebar ? "d delete   " : ""}p/n page`}
         </text>
-        <text fg={gray[600]}>{screen === "plugins" || transactionEditorOpen ? "" : "r refresh   s sync   q quit"}</text>
+        <text fg={gray[600]}>{screen !== "ledger" || transactionEditorOpen ? "" : "c counterpart   r refresh   s sync   q quit"}</text>
       </box>
     </box>
     </PopoverProvider>
