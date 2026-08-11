@@ -10,7 +10,7 @@ The demo is an example transaction import plugin. Configure it in `~/.config/mon
     "env": [],
     "config": {},
     "initializeTimeoutMs": 5000,
-    "requestTimeoutMs": 60000
+    "requestTimeoutMs": 120000
   }
 }
 ```
@@ -27,6 +27,7 @@ Inspect imported accounts:
 curl http://127.0.0.1:47832/accounts
 ```
 
-The demo includes checking and savings accounts plus income and expense account hierarchies. Every
-request for Checking transactions generates 3-5 new fake purchases, so every global Monet sync adds
-visible data. IDs remain stable for the lifetime of the plugin process.
+The demo includes Personal, Household, and Travel accounts under Checking, a savings account, and
+income and expense account hierarchies. Every request for a checking account's transactions
+generates 3-5 new fake purchases, so every global Monet sync adds visible data to each checking
+account. IDs remain stable for the lifetime of the plugin process.

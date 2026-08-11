@@ -110,7 +110,7 @@ fn default_initialize_timeout_ms() -> u64 {
 }
 
 fn default_request_timeout_ms() -> u64 {
-    60_000
+    120_000
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]

@@ -182,6 +182,11 @@ impl PluginProcess {
         method: &str,
         params: Value,
     ) -> Result<T, PluginError> {
+        let id = self.send_request(method, params).await?;
+        self.read_response(&id).await
+    }
+
+    async fn send_request(&mut self, method: &str, params: Value) -> Result<String, PluginError> {
         let id = self.next_id.to_string();
         self.next_id += 1;
         let message = serde_json::to_string(&JsonRpcRequest {
@@ -193,18 +198,21 @@ impl PluginProcess {
         self.stdin.write_all(message.as_bytes()).await?;
         self.stdin.write_all(b"\n").await?;
         self.stdin.flush().await?;
+        Ok(id)
+    }
 
+    async fn read_response<T: DeserializeOwned>(&mut self, id: &str) -> Result<T, PluginError> {
         loop {
             let line = self.stdout.next_line().await?.ok_or(PluginError::Exited)?;
             if line.len() > MAX_MESSAGE_BYTES {
                 return Err(PluginError::MessageTooLarge);
             }
             let value: Value = serde_json::from_str(&line)?;
-            if value.get("id").and_then(Value::as_str) != Some(id.as_str()) {
+            if value.get("id").and_then(Value::as_str) != Some(id) {
                 continue;
             }
             let response: JsonRpcResponse = serde_json::from_value(value)?;
-            if response.id != Value::String(id.clone()) {
+            if response.id != Value::String(id.to_owned()) {
                 continue;
             }
             if let Some(error) = response.error {
@@ -219,6 +227,18 @@ impl PluginProcess {
             })?;
             return serde_json::from_value(result).map_err(PluginError::from);
         }
+    }
+
+    async fn cancel(&mut self, id: &str) -> Result<(), PluginError> {
+        let message = serde_json::to_string(&json!({
+            "jsonrpc": "2.0",
+            "method": "$/cancelRequest",
+            "params": { "id": id },
+        }))?;
+        self.stdin.write_all(message.as_bytes()).await?;
+        self.stdin.write_all(b"\n").await?;
+        self.stdin.flush().await?;
+        Ok(())
     }
 
     async fn stop(&mut self) {
@@ -276,17 +296,29 @@ impl PluginManager {
                 }
             )));
         }
-        let result = timeout(
+        let id = running.send_request(method, params).await?;
+        let result = match timeout(
             Duration::from_millis(timeout_ms),
-            running.request(method, params),
+            running.read_response(&id),
         )
         .await
-        .map_err(|_| PluginError::Timeout)?;
+        {
+            Ok(result) => result,
+            Err(_) => {
+                if initialize.capabilities.cancellation {
+                    let _ = running.cancel(&id).await;
+                }
+                Err(PluginError::Timeout)
+            }
+        };
         match result {
             Ok(value) => Ok((value, initialize)),
             Err(error) => {
-                let _ = running.child.kill().await;
-                *process = None;
+                if !initialize.capabilities.cancellation || !matches!(&error, PluginError::Timeout)
+                {
+                    let _ = running.child.kill().await;
+                    *process = None;
+                }
                 Err(error)
             }
         }
@@ -355,14 +387,13 @@ impl InferenceManager {
         let request_id = uuid::Uuid::now_v7().to_string();
         crate::app_log::write_inference(&request_id, "request", &serde_json::to_value(&input)?);
         let timeout_ms = input.timeout_ms.unwrap_or(config.plugin.request_timeout_ms);
-        let params = serde_json::to_value(input)?;
         let response = self
             .plugin
             .with_process(
                 config.plugin,
                 Capability::Inference,
                 "inference/generate",
-                params,
+                serde_json::to_value(input)?,
                 timeout_ms,
             )
             .await

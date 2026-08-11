@@ -1,0 +1,8 @@
+{
+  "models": ["opencode/qwen3.6-plus"],
+  "disabledProviders": [],
+  "repetitions": 1,
+  "concurrency": 1,
+  "timeoutMs": 300000,
+  "resultsDir": "../.money-tui/evals/runs"
+}

@@ -57,7 +57,7 @@ Configure the bundled OpenCode plugin manually:
     "config": {},
     "model": null,
     "initializeTimeoutMs": 5000,
-    "requestTimeoutMs": 60000
+    "requestTimeoutMs": 120000
   },
   "import": null
 }
@@ -90,6 +90,31 @@ direction, source account, source type, and calendar recency. Direction is a har
 amount gap creates separate regimes; otherwise amount is ignored. Ambiguous local history abstains;
 only a transaction with no usable local cohort may use a retained LLM category. No additional
 inference call is made.
+
+## MCP
+
+Monet exposes a dependency-free, stateless JSON-RPC MCP endpoint at:
+
+```text
+http://127.0.0.1:47832/mcp
+```
+
+Initial read-only tools:
+
+```text
+monet_list_accounts
+monet_list_transactions
+monet_get_transaction
+```
+
+The endpoint supports `initialize`, `notifications/initialized`, `ping`, `tools/list`, and
+`tools/call` over HTTP POST. Tool results include both text content and `structuredContent`.
+
+```sh
+curl http://127.0.0.1:47832/mcp \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"manual","version":"1"}}}'
+```
 
 ## Terminal Control
 

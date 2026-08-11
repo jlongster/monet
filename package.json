@@ -6,7 +6,9 @@
   "scripts": {
     "demo-importer": "bun demo-importer/server.ts",
     "inference-opencode": "bun inference-plugins/opencode/index.ts",
+    "eval:task": "bun scripts/payee-eval.ts",
     "dev": "bun scripts/dev.ts",
+    "server:restart": "pkill -x monet-server 2>/dev/null || true; mkdir -p .money-tui; nohup cargo run --quiet --manifest-path server/Cargo.toml >> .money-tui/monet-server.stdout.log 2>&1 &",
     "start": "bun src/index.tsx",
     "test": "bun test --pass-with-no-tests",
     "typecheck": "tsc --noEmit"

@@ -18,6 +18,9 @@ type Transaction = {
 
 const accounts: Account[] = [
   { id: "checking", parent_id: null, name: "Checking", type: "asset" },
+  { id: "personal-checking", parent_id: "checking", name: "Personal", type: "asset" },
+  { id: "household-checking", parent_id: "checking", name: "Household", type: "asset" },
+  { id: "travel-checking", parent_id: "checking", name: "Travel", type: "asset" },
   { id: "savings", parent_id: null, name: "Savings", type: "asset" },
   { id: "income", parent_id: null, name: "Income", type: "income" },
   { id: "salary", parent_id: "income", name: "Salary", type: "income" },
@@ -26,8 +29,13 @@ const accounts: Account[] = [
   { id: "dining", parent_id: "expenses", name: "Dining", type: "expense" },
 ]
 
+const checkingAccountIds = new Set([
+  "personal-checking",
+  "household-checking",
+  "travel-checking",
+])
 const runId = Date.now().toString(36)
-const generated: Transaction[] = []
+const generatedByAccount = new Map<string, Transaction[]>()
 let sequence = 0
 
 const examples = [
@@ -42,7 +50,9 @@ const examples = [
 const randomInt = (minimum: number, maximum: number) =>
   Math.floor(Math.random() * (maximum - minimum + 1)) + minimum
 
-const generateTransactions = () => {
+const generateTransactions = (accountId: string) => {
+  const generated = generatedByAccount.get(accountId) ?? []
+  generatedByAccount.set(accountId, generated)
   const count = randomInt(3, 5)
   for (let index = 0; index < count; index++) {
     const example = examples[randomInt(0, examples.length - 1)]
@@ -55,9 +65,10 @@ const generateTransactions = () => {
       category: example.category,
       pending: false,
       notes: null,
-      raw: { demo: true, sequence },
+      raw: { demo: true, accountId, sequence },
     })
   }
+  return generated
 }
 
 const plugin = definePlugin({
@@ -79,13 +90,12 @@ const plugin = definePlugin({
       throw new Error(`Unknown account: ${accountId}`)
     }
 
-    if (accountId !== "checking") {
+    if (!checkingAccountIds.has(accountId)) {
       return { transactions: [], pending_ids: [] }
     }
 
-    generateTransactions()
     return {
-      transactions: generated,
+      transactions: generateTransactions(accountId),
       pending_ids: [],
     }
   },

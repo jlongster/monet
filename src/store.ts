@@ -128,6 +128,7 @@ type AccountPage = {
 
 type State = {
   accounts: Account[]
+  payees: string[]
   unbalancedTransactionCount: number
   selectedAccountId: string | null
   transactions: AccountTransaction[]
@@ -159,6 +160,7 @@ type State = {
 
 const initialState: State = {
   accounts: [],
+  payees: [],
   unbalancedTransactionCount: 0,
   selectedAccountId: null,
   transactions: [],
@@ -378,6 +380,7 @@ const load = (registry: Registry.Registry, preferredAccountId?: string | null, m
   Effect.gen(function* () {
     const startedAt = performance.now()
     const accounts = yield* request<Account[]>("/accounts")
+    const payees = yield* request<string[]>("/payees")
     const accountView = registry.get(accountViewAtom)
     const search = registry.get(transactionSearchAtom)
     const unbalancedQuery = new URLSearchParams({ account_types: accountTypesForView(accountView) })
@@ -401,6 +404,7 @@ const load = (registry: Registry.Registry, preferredAccountId?: string | null, m
     const transactions = page.transactions
     registry.set(stateAtom, {
       accounts,
+      payees,
       unbalancedTransactionCount: unbalanced.count,
       selectedAccountId,
       transactions,
@@ -1133,7 +1137,6 @@ const debugCategoryAccounts: ReadonlyArray<{
   { id: "019fd900-0000-7000-8000-000000000001", parent_id: null, name: "Expense", type: "expense" },
   { id: "019fd900-0000-7000-8000-000000000002", parent_id: "019fd900-0000-7000-8000-000000000001", name: "Life", type: "expense" },
   { id: "019fd900-0000-7000-8000-000000000003", parent_id: "019fd900-0000-7000-8000-000000000001", name: "Food", type: "expense" },
-  { id: "019fd900-0000-7000-8000-000000000004", parent_id: "019fd900-0000-7000-8000-000000000001", name: "Tithe", type: "expense" },
   { id: "019fd900-0000-7000-8000-000000000005", parent_id: "019fd900-0000-7000-8000-000000000001", name: "Kids", type: "expense" },
   { id: "019fd900-0000-7000-8000-000000000006", parent_id: "019fd900-0000-7000-8000-000000000001", name: "Clothing", type: "expense" },
   { id: "019fd900-0000-7000-8000-000000000007", parent_id: null, name: "Income", type: "income" },
@@ -1329,6 +1332,61 @@ export const setInlineCounterpart = (
         nextCursor: buffer.nextCursor,
         busy: false,
         message: "Updated counterpart",
+      }))
+      ensureTransactionBuffer(registry)
+    }),
+  )
+}
+
+export const setInlinePayee = (
+  registry: Registry.Registry,
+  payee: string,
+) => {
+  const state = registry.get(stateAtom)
+  const transaction = state.transactions[state.selectedTransactionIndex]
+  const value = payee.trim()
+  if (!transaction || !value || state.busy) return
+  setBusy(registry, `Setting payee to ${value}`)
+  execute(
+    registry,
+    Effect.gen(function* () {
+      yield* request(`/sources/${transaction.source_id}/changes`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          changes: [{
+            operation: "set",
+            target_id: transaction.source_id,
+            field: "payee",
+            value,
+          }],
+        }),
+      })
+      const buffer = yield* fetchTransactionBuffer(
+        state.selectedAccountId!,
+        Math.max(state.transactions.length, TRANSACTION_PAGE_SIZE * 2),
+        registry.get(accountViewAtom),
+        registry.get(transactionSearchAtom),
+      )
+      const selectedIndex = buffer.transactions.findIndex(
+        (candidate) =>
+          candidate.source_id === transaction.source_id &&
+          candidate.posting_id === transaction.posting_id,
+      )
+      registry.update(stateAtom, (current) => ({
+        ...current,
+        payees: current.payees.includes(value)
+          ? current.payees
+          : [...current.payees, value].sort((left, right) => left.localeCompare(right)),
+        transactions: buffer.transactions,
+        selectedTransactionIndex: selectedIndex >= 0
+          ? selectedIndex
+          : Math.max(0, buffer.transactions.findIndex(
+            (candidate) => candidate.source_id === transaction.source_id,
+          )),
+        nextCursor: buffer.nextCursor,
+        busy: false,
+        message: `Set payee to ${value}`,
       }))
       ensureTransactionBuffer(registry)
     }),

@@ -1,0 +1,1051 @@
+{
+  "name": "payee-cleanup",
+  "renderer": {
+    "command": ["cargo", "payee-render"],
+    "cwd": ".."
+  },
+  "scorer": {
+    "command": ["cargo", "payee-score"],
+    "cwd": ".."
+  },
+  "input": {
+    "accounts": [
+      {
+        "id": "019fd900-0000-7000-8000-000000000001",
+        "parentId": null,
+        "name": "Expense",
+        "type": "expense"
+      },
+      {
+        "id": "019fd900-0000-7000-8000-000000000002",
+        "parentId": "019fd900-0000-7000-8000-000000000001",
+        "name": "Life",
+        "type": "expense"
+      },
+      {
+        "id": "019fd900-0000-7000-8000-000000000003",
+        "parentId": "019fd900-0000-7000-8000-000000000001",
+        "name": "Food",
+        "type": "expense"
+      },
+      {
+        "id": "019fd900-0000-7000-8000-000000000005",
+        "parentId": "019fd900-0000-7000-8000-000000000001",
+        "name": "Kids",
+        "type": "expense"
+      },
+      {
+        "id": "019fd900-0000-7000-8000-000000000006",
+        "parentId": "019fd900-0000-7000-8000-000000000001",
+        "name": "Clothing",
+        "type": "expense"
+      },
+      {
+        "id": "019fd900-0000-7000-8000-000000000007",
+        "parentId": null,
+        "name": "Income",
+        "type": "income"
+      },
+      {
+        "id": "019fd900-0000-7000-8000-000000000008",
+        "parentId": "019fd900-0000-7000-8000-000000000007",
+        "name": "Salary",
+        "type": "income"
+      },
+      {
+        "id": "019fd900-0000-7000-8000-000000000009",
+        "parentId": "019fd900-0000-7000-8000-000000000007",
+        "name": "Misc",
+        "type": "income"
+      }
+    ],
+    "payees": [
+      {
+        "id": "p1",
+        "rawPayee": "Abercrombie & Fitch",
+        "direction": "inflow"
+      },
+      {
+        "id": "p2",
+        "rawPayee": "Wawa 8623",
+        "direction": "outflow"
+      },
+      {
+        "id": "p3",
+        "rawPayee": "Wendys 9565",
+        "direction": "outflow"
+      },
+      {
+        "id": "p4",
+        "rawPayee": "Qt 1121 Outside",
+        "direction": "outflow"
+      },
+      {
+        "id": "p5",
+        "rawPayee": "Hampton Inn & Suites Sene",
+        "direction": "outflow",
+        "potentialPayee": "Hampton Inn & Suites"
+      },
+      {
+        "id": "p6",
+        "rawPayee": "Shipt* Order",
+        "direction": "inflow",
+        "potentialPayee": "Shipt"
+      },
+      {
+        "id": "p7",
+        "rawPayee": "X CORP. PAID FEATURES",
+        "direction": "outflow",
+        "potentialPayee": "X Premium"
+      },
+      {
+        "id": "p8",
+        "rawPayee": "Chick-fil-a #02698",
+        "direction": "outflow",
+        "potentialPayee": "Chick-fil-A"
+      },
+      {
+        "id": "p9",
+        "rawPayee": "Shipt* Tip 491417034",
+        "direction": "outflow",
+        "potentialPayee": "Shipt"
+      },
+      {
+        "id": "p10",
+        "rawPayee": "Shipt* Order",
+        "direction": "outflow"
+      },
+      {
+        "id": "p11",
+        "rawPayee": "Target.com",
+        "direction": "outflow"
+      },
+      {
+        "id": "p12",
+        "rawPayee": "Pp*queensmill Recreation",
+        "direction": "outflow"
+      },
+      {
+        "id": "p13",
+        "rawPayee": "Dominion Energy",
+        "direction": "outflow"
+      },
+      {
+        "id": "p14",
+        "rawPayee": "Amazon Mktpl*564ji75u1 Amzn.com/bill Wa",
+        "direction": "outflow"
+      },
+      {
+        "id": "p15",
+        "rawPayee": "Tennis Channel. CLEENG",
+        "direction": "outflow"
+      },
+      {
+        "id": "p16",
+        "rawPayee": "Petco 1882",
+        "direction": "outflow"
+      },
+      {
+        "id": "p17",
+        "rawPayee": "al.Nord*VPNcom",
+        "direction": "outflow"
+      },
+      {
+        "id": "p18",
+        "rawPayee": "Deposit from MONEY XXXXXXX9782",
+        "direction": "inflow"
+      },
+      {
+        "id": "p19",
+        "rawPayee": "Withdrawal to Georgia-kitty XXXXXXX0588",
+        "direction": "outflow"
+      },
+      {
+        "id": "p20",
+        "rawPayee": "Deposit from 360 Checking XXXXXXX7327",
+        "direction": "inflow"
+      },
+      {
+        "id": "p21",
+        "rawPayee": "THRIVE MARKET",
+        "direction": "outflow"
+      },
+      {
+        "id": "p22",
+        "rawPayee": "Midlothianchildrensden",
+        "direction": "outflow"
+      },
+      {
+        "id": "p23",
+        "rawPayee": "Abercrombie & Fitch",
+        "direction": "outflow"
+      },
+      {
+        "id": "p24",
+        "rawPayee": "Giv*west End Presbyterian",
+        "direction": "outflow",
+        "potentialPayee": "West End Presbyterian"
+      },
+      {
+        "id": "p25",
+        "rawPayee": "Peacock 14a9a Premplus",
+        "direction": "outflow",
+        "potentialPayee": "Peacock"
+      },
+      {
+        "id": "p26",
+        "rawPayee": "Amazon Mktplace Pmts Amzn.com/bill Wa",
+        "direction": "inflow",
+        "potentialPayee": "Amazon"
+      },
+      {
+        "id": "p27",
+        "rawPayee": "Shipt* Order Shipt.com Al",
+        "direction": "outflow",
+        "potentialPayee": "Shipt"
+      },
+      {
+        "id": "p28",
+        "rawPayee": "Airbnb",
+        "direction": "outflow"
+      },
+      {
+        "id": "p29",
+        "rawPayee": "Amazon Mktplace Pmts",
+        "direction": "outflow"
+      },
+      {
+        "id": "p30",
+        "rawPayee": "Anthropic* Claude Sub",
+        "direction": "outflow",
+        "potentialPayee": "Claude.ai"
+      },
+      {
+        "id": "p31",
+        "rawPayee": "Starbucks",
+        "direction": "outflow",
+        "potentialPayee": "Starbucks"
+      },
+      {
+        "id": "p32",
+        "rawPayee": "External Loan Payment Third / Federal Sa vings and Loan - PAYMENT",
+        "direction": "inflow",
+        "potentialPayee": "Third Federal"
+      },
+      {
+        "id": "p33",
+        "rawPayee": "Sweetfrog 35231",
+        "direction": "outflow"
+      },
+      {
+        "id": "p34",
+        "rawPayee": "Wawa 8647",
+        "direction": "outflow",
+        "potentialPayee": "Wawa"
+      },
+      {
+        "id": "p35",
+        "rawPayee": "Sp Rowan Inc",
+        "direction": "outflow",
+        "potentialPayee": "Rowan"
+      },
+      {
+        "id": "p36",
+        "rawPayee": "Third Federal Sa",
+        "direction": "outflow",
+        "potentialPayee": "Third Federal"
+      },
+      {
+        "id": "p37",
+        "rawPayee": "XTREME HEIGHTS GYMNAST",
+        "direction": "outflow",
+        "potentialPayee": "Xtreme Heights Gymnastics"
+      },
+      {
+        "id": "p38",
+        "rawPayee": "Harris Teeter #0181",
+        "direction": "outflow"
+      },
+      {
+        "id": "p39",
+        "rawPayee": "Sunsations #005 (3v)",
+        "direction": "outflow"
+      },
+      {
+        "id": "p40",
+        "rawPayee": "American Eagle 2203",
+        "direction": "outflow",
+        "potentialPayee": "American Eagle"
+      },
+      {
+        "id": "p41",
+        "rawPayee": "Outback #4756",
+        "direction": "outflow",
+        "potentialPayee": "Outback Steakhouse"
+      },
+      {
+        "id": "p42",
+        "rawPayee": "Withdrawal to Evelina XXXXXXX9574",
+        "direction": "outflow",
+        "potentialPayee": "transfer"
+      },
+      {
+        "id": "p43",
+        "rawPayee": "Withdrawal to MONEY XXXXXXX9782",
+        "direction": "outflow",
+        "potentialPayee": "transfer"
+      },
+      {
+        "id": "p44",
+        "rawPayee": "CL *Chase Travel",
+        "direction": "outflow",
+        "potentialPayee": "Chase Travel"
+      },
+      {
+        "id": "p45",
+        "rawPayee": "TRAVEL CREDIT $300/YEAR",
+        "direction": "inflow",
+        "potentialPayee": "Chase Travel Credit"
+      },
+      {
+        "id": "p46",
+        "rawPayee": "ACAC FITNESS & WELLNESS",
+        "direction": "outflow",
+        "potentialPayee": "ACAC"
+      },
+      {
+        "id": "p47",
+        "rawPayee": "Wave - *xtreme Heights Gy",
+        "direction": "outflow",
+        "potentialPayee": "Xtreme Heights Gymnastics"
+      },
+      {
+        "id": "p48",
+        "rawPayee": "Chick-fil-a #01227",
+        "direction": "outflow",
+        "potentialPayee": "Chick-fil-A"
+      },
+      {
+        "id": "p49",
+        "rawPayee": "Lowe's #113",
+        "direction": "outflow",
+        "potentialPayee": "Lowe's"
+      },
+      {
+        "id": "p50",
+        "rawPayee": "Five Below 280",
+        "direction": "outflow",
+        "potentialPayee": "Five Below"
+      },
+      {
+        "id": "p51",
+        "rawPayee": "Publix #1679",
+        "direction": "outflow",
+        "potentialPayee": "Publix"
+      },
+      {
+        "id": "p52",
+        "rawPayee": "Dillards 179 Stony Point",
+        "direction": "outflow",
+        "potentialPayee": "Dillard's Stony Point"
+      },
+      {
+        "id": "p53",
+        "rawPayee": "AWS",
+        "direction": "outflow",
+        "potentialPayee": "AWS"
+      },
+      {
+        "id": "p54",
+        "rawPayee": "LINODE . AKAMAI",
+        "direction": "outflow",
+        "potentialPayee": "Linode"
+      },
+      {
+        "id": "p55",
+        "rawPayee": "FLY.IO",
+        "direction": "outflow",
+        "potentialPayee": "Fly.io"
+      },
+      {
+        "id": "p56",
+        "rawPayee": "Starbucks Store 57624",
+        "direction": "outflow",
+        "potentialPayee": "Starbucks"
+      },
+      {
+        "id": "p57",
+        "rawPayee": "Wawa 8684",
+        "direction": "outflow",
+        "potentialPayee": "Wawa"
+      },
+      {
+        "id": "p58",
+        "rawPayee": "Kings Dominion Food",
+        "direction": "outflow",
+        "potentialPayee": "Kings Dominion"
+      },
+      {
+        "id": "p59",
+        "rawPayee": "Monthly Interest Paid",
+        "direction": "inflow",
+        "potentialPayee": "Interest Paid"
+      },
+      {
+        "id": "p60",
+        "rawPayee": "Destination Lighting",
+        "direction": "outflow",
+        "potentialPayee": "Destination Lighting"
+      },
+      {
+        "id": "p61",
+        "rawPayee": "Venmo",
+        "direction": "outflow",
+        "potentialPayee": "Venmo"
+      },
+      {
+        "id": "p62",
+        "rawPayee": "PARAMOUNT+",
+        "direction": "outflow",
+        "potentialPayee": "Paramount+"
+      },
+      {
+        "id": "p63",
+        "rawPayee": "Publix",
+        "direction": "outflow",
+        "potentialPayee": "Publix"
+      },
+      {
+        "id": "p64",
+        "rawPayee": "Dairy Queen #15570",
+        "direction": "outflow",
+        "potentialPayee": "Dairy Queen"
+      },
+      {
+        "id": "p65",
+        "rawPayee": "Trader Joe S #786",
+        "direction": "outflow",
+        "potentialPayee": "Trader Joe's"
+      },
+      {
+        "id": "p66",
+        "rawPayee": "Amazon Mktpl*781pz1by3 Amzn.com/bill Wa",
+        "direction": "outflow",
+        "potentialPayee": "Amazon"
+      },
+      {
+        "id": "p67",
+        "rawPayee": "Deel PEOBBGZAAD3",
+        "direction": "inflow",
+        "potentialPayee": "Deel"
+      },
+      {
+        "id": "p68",
+        "rawPayee": "Ulta 1878",
+        "direction": "outflow",
+        "potentialPayee": "Ulta"
+      },
+      {
+        "id": "p69",
+        "rawPayee": "Target T-2478",
+        "direction": "outflow",
+        "potentialPayee": "Target"
+      },
+      {
+        "id": "p70",
+        "rawPayee": "Target T-2478 Midlothian Va",
+        "direction": "inflow",
+        "potentialPayee": "Target"
+      },
+      {
+        "id": "p71",
+        "rawPayee": "Cvs/pharmacy #04242",
+        "direction": "outflow",
+        "potentialPayee": "CVS Pharmacy"
+      },
+      {
+        "id": "p72",
+        "rawPayee": "Amazon.com",
+        "direction": "outflow",
+        "potentialPayee": "Amazon"
+      },
+      {
+        "id": "p73",
+        "rawPayee": "Tennis Warehouse",
+        "direction": "outflow",
+        "potentialPayee": "Tennis Warehouse"
+      },
+      {
+        "id": "p74",
+        "rawPayee": "Five Below",
+        "direction": "outflow",
+        "potentialPayee": "Five Below"
+      },
+      {
+        "id": "p75",
+        "rawPayee": "Target",
+        "direction": "outflow",
+        "potentialPayee": "Target"
+      },
+      {
+        "id": "p76",
+        "rawPayee": "Audible",
+        "direction": "outflow",
+        "potentialPayee": "Audible"
+      },
+      {
+        "id": "p77",
+        "rawPayee": "Prime Video Tvod",
+        "direction": "outflow",
+        "potentialPayee": "Prime Video"
+      },
+      {
+        "id": "p78",
+        "rawPayee": "Prime Video Channels",
+        "direction": "outflow",
+        "potentialPayee": "Prime Video Channels"
+      },
+      {
+        "id": "p79",
+        "rawPayee": "Regal Cinemas",
+        "direction": "outflow",
+        "potentialPayee": "Regal Cinemas"
+      },
+      {
+        "id": "p80",
+        "rawPayee": "Sheetz 2764",
+        "direction": "outflow",
+        "potentialPayee": "Sheetz"
+      },
+      {
+        "id": "p81",
+        "rawPayee": "Kings Dominion Merchandis",
+        "direction": "outflow",
+        "potentialPayee": "Kings Dominion"
+      },
+      {
+        "id": "p82",
+        "rawPayee": "Sp Tennis Express",
+        "direction": "outflow"
+      },
+      {
+        "id": "p83",
+        "rawPayee": "Amazon",
+        "direction": "outflow"
+      },
+      {
+        "id": "p84",
+        "rawPayee": "RVA LIQUIDATION",
+        "direction": "outflow",
+        "potentialPayee": "RVA Liquidation"
+      },
+      {
+        "id": "p85",
+        "rawPayee": "Kroger #523",
+        "direction": "outflow",
+        "potentialPayee": "Kroger"
+      },
+      {
+        "id": "p86",
+        "rawPayee": "Mission Bbq Hull St. Midl",
+        "direction": "outflow",
+        "potentialPayee": "Mission BBQ"
+      },
+      {
+        "id": "p87",
+        "rawPayee": "Target.com 800-440-0680 Mn",
+        "direction": "outflow",
+        "potentialPayee": "Target"
+      },
+      {
+        "id": "p88",
+        "rawPayee": "Target.com * 800-591-3869 Mn",
+        "direction": "outflow"
+      },
+      {
+        "id": "p89",
+        "rawPayee": "Tst* Pinky S - Scotts Richmond Va",
+        "direction": "outflow"
+      },
+      {
+        "id": "p90",
+        "rawPayee": "TST* CORNER ROCK CAFE",
+        "direction": "outflow",
+        "potentialPayee": "Corner Rock Cafe"
+      },
+      {
+        "id": "p91",
+        "rawPayee": "Publix #1694",
+        "direction": "outflow",
+        "potentialPayee": "Publix"
+      },
+      {
+        "id": "p92",
+        "rawPayee": "Target T-1041",
+        "direction": "outflow",
+        "potentialPayee": "Target"
+      },
+      {
+        "id": "p93",
+        "rawPayee": "Dsw Inc.",
+        "direction": "outflow",
+        "potentialPayee": "DSW"
+      },
+      {
+        "id": "p94",
+        "rawPayee": "Tst*goldwing Richmond Va",
+        "direction": "outflow",
+        "potentialPayee": "Goldwing"
+      },
+      {
+        "id": "p95",
+        "rawPayee": "DisneyPLUS",
+        "direction": "outflow",
+        "potentialPayee": "Disney+"
+      },
+      {
+        "id": "p96",
+        "rawPayee": "CHASE CREDIT CRD",
+        "direction": "outflow",
+        "potentialPayee": "Chase Credit Card Payment"
+      },
+      {
+        "id": "p97",
+        "rawPayee": "Aldi 80064",
+        "direction": "outflow",
+        "potentialPayee": "ALDI"
+      },
+      {
+        "id": "p98",
+        "rawPayee": "Interest Charge On Purchases",
+        "direction": "outflow"
+      },
+      {
+        "id": "p99",
+        "rawPayee": "Monthly Maintenance Fee Waived",
+        "direction": "inflow"
+      },
+      {
+        "id": "p100",
+        "rawPayee": "Monthly Maintenance Fee",
+        "direction": "outflow"
+      }
+    ]
+  },
+  "reference": {
+    "p1": {
+      "payee": "Abercrombie & Fitch",
+      "category": "c1"
+    },
+    "p2": {
+      "payee": "Wawa",
+      "category": "c2"
+    },
+    "p3": {
+      "payee": "Wendy's",
+      "category": "c2"
+    },
+    "p4": {
+      "payee": "QuikTrip",
+      "category": null
+    },
+    "p5": {
+      "payee": "Hampton Inn & Suites",
+      "category": "c4"
+    },
+    "p6": {
+      "payee": "Shipt",
+      "category": "c2"
+    },
+    "p7": {
+      "payee": "X Premium",
+      "category": "c4"
+    },
+    "p8": {
+      "payee": "Chick-fil-A",
+      "category": "c2"
+    },
+    "p9": {
+      "payee": "Shipt",
+      "category": "c2"
+    },
+    "p10": {
+      "payee": "Shipt",
+      "category": "c2"
+    },
+    "p11": {
+      "payee": "Target.com",
+      "category": null
+    },
+    "p12": {
+      "payee": "Queensmill Recreation",
+      "category": "c3"
+    },
+    "p13": {
+      "payee": "Dominion Energy",
+      "category": "c4"
+    },
+    "p14": {
+      "payee": "Amazon",
+      "category": null
+    },
+    "p15": {
+      "payee": "Tennis Channel",
+      "category": "c4"
+    },
+    "p16": {
+      "payee": "Petco",
+      "category": "c4"
+    },
+    "p17": {
+      "payee": "NordVPN",
+      "category": "c4"
+    },
+    "p18": {
+      "payee": "Capital One Transfer from MONEY",
+      "category": "transfer"
+    },
+    "p19": {
+      "payee": "Capital One Transfer to Georgia-kitty",
+      "category": "transfer"
+    },
+    "p20": {
+      "payee": "Capital One Transfer from 360 Checking",
+      "category": "transfer"
+    },
+    "p21": {
+      "payee": "Thrive Market",
+      "category": "c2"
+    },
+    "p22": {
+      "payee": "Midlothian Children's Dentistry",
+      "category": "c3"
+    },
+    "p23": {
+      "payee": "Abercrombie & Fitch",
+      "category": "c1"
+    },
+    "p24": {
+      "payee": "West End Presbyterian",
+      "category": null
+    },
+    "p25": {
+      "payee": "Peacock",
+      "category": "c4"
+    },
+    "p26": {
+      "payee": "Amazon",
+      "category": null
+    },
+    "p27": {
+      "payee": "Shipt",
+      "category": "c2"
+    },
+    "p28": {
+      "payee": "Airbnb",
+      "category": "c4"
+    },
+    "p29": {
+      "payee": "Amazon",
+      "category": null
+    },
+    "p30": {
+      "payee": "Claude.ai",
+      "category": "c4"
+    },
+    "p31": {
+      "payee": "Starbucks",
+      "category": "c2"
+    },
+    "p32": {
+      "payee": "Third Federal",
+      "category": "transfer"
+    },
+    "p33": {
+      "payee": "Sweet Frog",
+      "category": "c2"
+    },
+    "p34": {
+      "payee": "Wawa",
+      "category": "c2"
+    },
+    "p35": {
+      "payee": "Rowan",
+      "category": "c1"
+    },
+    "p36": {
+      "payee": "Third Federal",
+      "category": "transfer"
+    },
+    "p37": {
+      "payee": "Xtreme Heights Gymnastics",
+      "category": "c3"
+    },
+    "p38": {
+      "payee": "Harris Teeter",
+      "category": "c2"
+    },
+    "p39": {
+      "payee": "Sunsations",
+      "category": "c1"
+    },
+    "p40": {
+      "payee": "American Eagle",
+      "category": "c1"
+    },
+    "p41": {
+      "payee": "Outback Steakhouse",
+      "category": "c2"
+    },
+    "p42": {
+      "payee": "Capital One Transfer to Evelina",
+      "category": "transfer"
+    },
+    "p43": {
+      "payee": "Capital One Transfer to MONEY",
+      "category": "transfer"
+    },
+    "p44": {
+      "payee": "Chase Travel",
+      "category": "c4"
+    },
+    "p45": {
+      "payee": "Chase Travel Credit",
+      "category": "c4"
+    },
+    "p46": {
+      "payee": "ACAC Fitness & Wellness",
+      "category": "c4"
+    },
+    "p47": {
+      "payee": "Xtreme Heights Gymnastics",
+      "category": "c3"
+    },
+    "p48": {
+      "payee": "Chick-fil-A",
+      "category": "c2"
+    },
+    "p49": {
+      "payee": "Lowe's",
+      "category": "c4"
+    },
+    "p50": {
+      "payee": "Five Below",
+      "category": "c3"
+    },
+    "p51": {
+      "payee": "Publix",
+      "category": "c2"
+    },
+    "p52": {
+      "payee": "Dillard's Stony Point",
+      "category": "c1"
+    },
+    "p53": {
+      "payee": "AWS",
+      "category": "c4"
+    },
+    "p54": {
+      "payee": "Linode",
+      "category": "c4"
+    },
+    "p55": {
+      "payee": "Fly.io",
+      "category": "c4"
+    },
+    "p56": {
+      "payee": "Starbucks",
+      "category": "c2"
+    },
+    "p57": {
+      "payee": "Wawa",
+      "category": "c2"
+    },
+    "p58": {
+      "payee": "Kings Dominion - Food",
+      "category": "c2"
+    },
+    "p59": {
+      "payee": "Interest Paid",
+      "category": "c5"
+    },
+    "p60": {
+      "payee": "Destination Lighting",
+      "category": "c4"
+    },
+    "p61": {
+      "payee": "Venmo",
+      "category": null
+    },
+    "p62": {
+      "payee": "Paramount+",
+      "category": "c4"
+    },
+    "p63": {
+      "payee": "Publix",
+      "category": "c2"
+    },
+    "p64": {
+      "payee": "Dairy Queen",
+      "category": "c2"
+    },
+    "p65": {
+      "payee": "Trader Joe's",
+      "category": "c2"
+    },
+    "p66": {
+      "payee": "Amazon",
+      "category": null
+    },
+    "p67": {
+      "payee": "Deel",
+      "category": "c6"
+    },
+    "p68": {
+      "payee": "Ulta",
+      "category": "c4"
+    },
+    "p69": {
+      "payee": "Target",
+      "category": null
+    },
+    "p70": {
+      "payee": "Target",
+      "category": null
+    },
+    "p71": {
+      "payee": "CVS Pharmacy",
+      "category": "c4"
+    },
+    "p72": {
+      "payee": "Amazon",
+      "category": null
+    },
+    "p73": {
+      "payee": "Tennis Warehouse",
+      "category": "c4"
+    },
+    "p74": {
+      "payee": "Five Below",
+      "category": "c3"
+    },
+    "p75": {
+      "payee": "Target",
+      "category": null
+    },
+    "p76": {
+      "payee": "Audible",
+      "category": "c4"
+    },
+    "p77": {
+      "payee": "Prime Video",
+      "category": "c4"
+    },
+    "p78": {
+      "payee": "Prime Video Channels",
+      "category": "c4"
+    },
+    "p79": {
+      "payee": "Regal Cinemas",
+      "category": "c4"
+    },
+    "p80": {
+      "payee": "Sheetz",
+      "category": "c2"
+    },
+    "p81": {
+      "payee": "Kings Dominion - Merchandise",
+      "category": "c3"
+    },
+    "p82": {
+      "payee": "Tennis Express",
+      "category": "c4"
+    },
+    "p83": {
+      "payee": "Amazon",
+      "category": null
+    },
+    "p84": {
+      "payee": "RVA Liquidation",
+      "category": null
+    },
+    "p85": {
+      "payee": "Kroger",
+      "category": "c2"
+    },
+    "p86": {
+      "payee": "Mission BBQ",
+      "category": "c2"
+    },
+    "p87": {
+      "payee": "Target.com",
+      "category": null
+    },
+    "p88": {
+      "payee": "Target.com",
+      "category": null
+    },
+    "p89": {
+      "payee": "Pinky's",
+      "category": "c2"
+    },
+    "p90": {
+      "payee": "Corner Rock Cafe",
+      "category": "c2"
+    },
+    "p91": {
+      "payee": "Publix",
+      "category": "c2"
+    },
+    "p92": {
+      "payee": "Target",
+      "category": null
+    },
+    "p93": {
+      "payee": "DSW",
+      "category": "c1"
+    },
+    "p94": {
+      "payee": "Goldwing",
+      "category": "c2"
+    },
+    "p95": {
+      "payee": "Disney+",
+      "category": "c4"
+    },
+    "p96": {
+      "payee": "Chase Credit Card Payment",
+      "category": "transfer"
+    },
+    "p97": {
+      "payee": "ALDI",
+      "category": "c2"
+    },
+    "p98": {
+      "payee": "Interest Charge",
+      "category": null
+    },
+    "p99": {
+      "payee": "Monthly Maintenance Fee Waiver",
+      "category": null
+    },
+    "p100": {
+      "payee": "Monthly Maintenance Fee",
+      "category": null
+    }
+  },
+  "variants": [
+    {
+      "id": "no-potentials",
+      "parameters": {
+        "includePotentials": false
+      }
+    },
+    {
+      "id": "mixed-potentials",
+      "parameters": {
+        "includePotentials": true
+      }
+    }
+  ]
+}

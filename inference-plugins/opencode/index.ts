@@ -1,10 +1,7 @@
-import {
-  definePlugin,
-  servePlugin,
-  type GenerateRequest,
-} from "../../plugin-sdk/index"
+import { definePlugin, servePlugin, type GenerateRequest } from "../../plugin-sdk/index"
+import { parseStructured } from "./structured"
 
-const api = async (method: string, path: string, body?: unknown) => {
+const api = async (method: string, path: string, body?: unknown, signal?: AbortSignal) => {
   const command = ["opencode2", "api", method, path]
   if (body !== undefined) command.push("--data", JSON.stringify(body))
   const child = Bun.spawn(command, {
@@ -12,38 +9,57 @@ const api = async (method: string, path: string, body?: unknown) => {
     stdout: "pipe",
     stderr: "pipe",
   })
+  const cancel = () => child.kill()
+  if (signal?.aborted) cancel()
+  else signal?.addEventListener("abort", cancel, { once: true })
   const [stdout, stderr, status] = await Promise.all([
     new Response(child.stdout).text(),
     new Response(child.stderr).text(),
     child.exited,
-  ])
+  ]).finally(() => signal?.removeEventListener("abort", cancel))
+  if (signal?.aborted) throw new Error("OpenCode request was cancelled")
   if (status !== 0) throw new Error(stderr.trim() || `opencode2 api exited with ${status}`)
   return JSON.parse(stdout)
 }
 
-const models = async () => {
-  const response = await api("get", "/api/model")
-  return response.data as Array<{
-    id: string
-    modelID: string
-    providerID: string
-    name: string
-    enabled: boolean
-    capabilities: unknown
-  }>
+type OpenCodeModel = {
+  id: string
+  modelID: string
+  providerID: string
+  name: string
+  enabled: boolean
+  capabilities: unknown
 }
 
-const modelReference = (model: { id: string; providerID: string }) =>
-  `${model.providerID}/${model.id}`
+let modelCache: OpenCodeModel[] | undefined
+let defaultModelCache: OpenCodeModel | undefined
+
+const models = async (refresh = false, signal?: AbortSignal) => {
+  if (!refresh && modelCache) return modelCache
+  const response = await api("get", "/api/model", undefined, signal)
+  modelCache = response.data as OpenCodeModel[]
+  if (refresh) defaultModelCache = undefined
+  return modelCache
+}
+
+const defaultModel = async (signal?: AbortSignal) => {
+  if (defaultModelCache) return defaultModelCache
+  const response = await api("get", "/api/model/default", undefined, signal)
+  defaultModelCache = response.data as OpenCodeModel
+  return defaultModelCache
+}
+
+const modelReference = (model: { id: string; providerID: string }) => `${model.providerID}/${model.id}`
 
 const plugin = definePlugin({
   name: "OpenCode",
   version: "1.0.0",
   structuredOutput: true,
+  cancellation: true,
 
   async status() {
     await api("get", "/api/health")
-    const available = (await models()).filter((model) => model.enabled)
+    const available = (await models(true)).filter((model) => model.enabled)
     return available.length > 0
       ? { ready: true, detail: `${available.length} enabled models` }
       : {
@@ -55,7 +71,7 @@ const plugin = definePlugin({
 
   async models() {
     return {
-      models: (await models())
+      models: (await models(true))
         .filter((model) => model.enabled)
         .map((model) => ({
           id: modelReference(model),
@@ -66,28 +82,39 @@ const plugin = definePlugin({
     }
   },
 
-  async generate(request: GenerateRequest) {
-    const available = await models()
+  async generate(request: GenerateRequest, _config: unknown, signal: AbortSignal) {
     const selected = request.model
-      ? available.find((model) => modelReference(model) === request.model)
-      : undefined
+      ? (await models(false, signal)).find((model) => modelReference(model) === request.model)
+      : await defaultModel(signal)
     if (request.model && !selected) throw new Error(`OpenCode model '${request.model}' was not found`)
+    if (!selected) throw new Error("OpenCode default model was not found")
     const prompt = [
       request.system,
       request.prompt,
       request.outputSchema
         ? `Return only JSON matching this JSON Schema:\n${JSON.stringify(request.outputSchema)}`
         : undefined,
-    ].filter(Boolean).join("\n\n")
-    const response = await api("post", "/api/generate", {
-      prompt,
-      ...(selected ? { model: { id: selected.id, providerID: selected.providerID } } : {}),
-    })
+    ]
+      .filter(Boolean)
+      .join("\n\n")
+    const response = await api(
+      "post",
+      "/api/generate",
+      {
+        prompt,
+        model: {
+          id: selected.id,
+          providerID: selected.providerID,
+        },
+      },
+      signal,
+    )
     const text = response.data.text
     return {
       text,
-      ...(request.outputSchema ? { structured: JSON.parse(text) } : {}),
-      model: selected ? modelReference(selected) : "default",
+      ...(request.outputSchema ? { structured: parseStructured(text) } : {}),
+      model: request.model ? modelReference(selected) : "default",
+      usage: response.data.usage,
     }
   },
 })

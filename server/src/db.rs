@@ -590,6 +590,17 @@ impl Database {
         .collect()
     }
 
+    pub fn list_payees(&self) -> Result<Vec<String>, DatabaseError> {
+        let mut statement = self.connection.prepare(
+            "SELECT DISTINCT payee
+             FROM postings
+             WHERE payee IS NOT NULL AND trim(payee) != ''
+             ORDER BY payee COLLATE NOCASE",
+        )?;
+        let rows = statement.query_map([], |row| row.get(0))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     pub fn upsert_source(
         &mut self,
         id: &str,

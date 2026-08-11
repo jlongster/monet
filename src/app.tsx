@@ -35,6 +35,7 @@ import {
   setAccountCollapsed,
   setAccountView,
   setInlineCounterpart,
+  setInlinePayee,
   setTransactionSearch,
   selectedAccountAtom,
   selectedTransactionAtom,
@@ -238,9 +239,13 @@ export function App() {
   const [syncDateError, setSyncDateError] = useState<string | null>(null)
   const syncLogRef = useRef<ScrollBoxRenderable>(null)
   const counterpartAnchorRef = useRef<BoxRenderable>(null)
+  const payeeAnchorRef = useRef<BoxRenderable>(null)
   const [counterpartPickerOpen, setCounterpartPickerOpen] = useState(false)
   const [counterpartFilter, setCounterpartFilter] = useState("")
   const [counterpartHighlight, setCounterpartHighlight] = useState(0)
+  const [payeePickerOpen, setPayeePickerOpen] = useState(false)
+  const [payeeFilter, setPayeeFilter] = useState("")
+  const [payeeHighlight, setPayeeHighlight] = useState(0)
   const [notesHeight, setNotesHeight] = useState(3)
   const notesMeasureCallback = useRef<(() => void) | null>(null)
   const showAccountSidebar = terminalWidth >= ACCOUNT_SIDEBAR_WIDTH +
@@ -292,11 +297,23 @@ export function App() {
       0,
       assignmentAccounts.findIndex((account) => account.id === current),
     ))
+    setPayeePickerOpen(false)
     setCounterpartPickerOpen(true)
   }
   const selectInlineCounterpart = (accountId: string) => {
     setCounterpartPickerOpen(false)
     setInlineCounterpart(registry, accountId)
+  }
+  const openPayeePicker = () => {
+    if (!selectedTransaction || state.busy || transactionEditorOpen) return
+    setPayeeFilter("")
+    setPayeeHighlight(0)
+    setCounterpartPickerOpen(false)
+    setPayeePickerOpen(true)
+  }
+  const selectInlinePayee = (payee: string) => {
+    setPayeePickerOpen(false)
+    setInlinePayee(registry, payee)
   }
   const assignmentTree = assignmentAccounts
   const selectedAssignment = assignmentAccounts[state.selectedAssignmentIndex] ?? null
@@ -316,6 +333,22 @@ export function App() {
   const visibleCounterpartOptions = counterpartOptions.slice(
     counterpartVisibleStart,
     counterpartVisibleStart + counterpartVisibleCount,
+  )
+  const normalizedPayeeFilter = payeeFilter.trim().toLocaleLowerCase()
+  const payeeOptions = normalizedPayeeFilter
+    ? state.payees.filter((payee) => payee.toLocaleLowerCase().startsWith(normalizedPayeeFilter))
+    : []
+  const payeeVisibleCount = Math.min(10, Math.max(1, payeeOptions.length))
+  const payeeVisibleStart = Math.max(
+    0,
+    Math.min(
+      payeeHighlight - Math.floor(payeeVisibleCount / 2),
+      payeeOptions.length - payeeVisibleCount,
+    ),
+  )
+  const visiblePayeeOptions = payeeOptions.slice(
+    payeeVisibleStart,
+    payeeVisibleStart + payeeVisibleCount,
   )
   const editingPosting = selectedTransaction?.other_postings.find(
     (posting) => posting.posting_id === state.editingPostingId,
@@ -761,6 +794,7 @@ export function App() {
 
   useEffect(() => {
     setCounterpartPickerOpen(false)
+    setPayeePickerOpen(false)
   }, [selectedTransaction?.posting_id])
 
   useEffect(() => {
@@ -768,18 +802,23 @@ export function App() {
   }, [counterpartOptions.length, counterpartFilter])
 
   useEffect(() => {
-    if (!counterpartPickerOpen) return
+    setPayeeHighlight((index) => Math.min(index, Math.max(0, payeeOptions.length - 1)))
+  }, [payeeOptions.length, payeeFilter])
+
+  useEffect(() => {
+    if (!counterpartPickerOpen && !payeePickerOpen) return
     const initialScrollTop = transactionListRef.current?.scrollTop
     const closeOnScroll = () => {
       if (transactionListRef.current?.scrollTop !== initialScrollTop) {
         setCounterpartPickerOpen(false)
+        setPayeePickerOpen(false)
       }
     }
     renderer.on("frame", closeOnScroll)
     return () => {
       renderer.off("frame", closeOnScroll)
     }
-  }, [counterpartPickerOpen, renderer])
+  }, [counterpartPickerOpen, payeePickerOpen, renderer])
 
   useEffect(() => {
     if (!state.trace) return
@@ -873,6 +912,24 @@ export function App() {
       }
       return
     }
+    if (payeePickerOpen) {
+      if (["escape", "up", "down", "return", "enter"].includes(key.name)) {
+        key.preventDefault()
+        key.stopPropagation()
+      }
+      if (key.name === "escape") setPayeePickerOpen(false)
+      if (key.name === "up" && payeeOptions.length > 0) {
+        setPayeeHighlight((index) => Math.max(0, index - 1))
+      }
+      if (key.name === "down" && payeeOptions.length > 0) {
+        setPayeeHighlight((index) => Math.min(payeeOptions.length - 1, index + 1))
+      }
+      if (key.name === "return" || key.name === "enter") {
+        const payee = payeeOptions[payeeHighlight] ?? payeeFilter.trim()
+        if (payee) selectInlinePayee(payee)
+      }
+      return
+    }
     if (counterpartPickerOpen) {
       if (["escape", "up", "down", "return", "enter"].includes(key.name)) {
         key.preventDefault()
@@ -911,6 +968,10 @@ export function App() {
     }
     if (key.name === "c" && state.focus === "transactions") {
       openCounterpartPicker()
+      return
+    }
+    if (key.name === "p" && state.focus === "transactions") {
+      openPayeePicker()
       return
     }
     if (transactionDraft) {
@@ -982,13 +1043,13 @@ export function App() {
       if (
         !transactionEditing &&
         normalEditorFocus === "register" &&
-        (key.name === "pageDown" || key.name === "pagedown" || key.name === "n" ||
-          key.name === "pageUp" || key.name === "pageup" || key.name === "p")
+        (key.name === "pageDown" || key.name === "pagedown" ||
+          key.name === "pageUp" || key.name === "pageup")
       ) {
         key.preventDefault()
         key.stopPropagation()
         moveTransactionViewport(
-          key.name === "pageUp" || key.name === "pageup" || key.name === "p" ? -1 : 1,
+          key.name === "pageUp" || key.name === "pageup" ? -1 : 1,
         )
       }
       if (
@@ -1087,13 +1148,13 @@ export function App() {
     }
     if (
       state.focus === "transactions" &&
-      (key.name === "pageDown" || key.name === "pagedown" || key.name === "n" ||
-        key.name === "pageUp" || key.name === "pageup" || key.name === "p")
+      (key.name === "pageDown" || key.name === "pagedown" ||
+        key.name === "pageUp" || key.name === "pageup")
     ) {
       key.preventDefault()
       key.stopPropagation()
       moveTransactionViewport(
-        key.name === "pageUp" || key.name === "pageup" || key.name === "p" ? -1 : 1,
+        key.name === "pageUp" || key.name === "pageup" ? -1 : 1,
       )
     }
     if (key.name === "return" || key.name === "enter") {
@@ -2006,13 +2067,13 @@ export function App() {
                       <text fg={startsDay ? gray[200] : gray[600]} style={{ width: 11, paddingLeft: 1 }}>
                         {transaction.date}
                       </text>
-                      <text
-                        fg={gray[200]}
-                        wrapMode="none"
-                        style={flexibleTableColumn}
+                      <box
+                        ref={selected ? payeeAnchorRef : undefined}
+                        style={{ ...flexibleTableColumn, height: 1 }}
+                        onMouseDown={selected ? openPayeePicker : undefined}
                       >
-                        {payeeLabel}
-                      </text>
+                        <text fg={gray[200]} wrapMode="none">{payeeLabel}</text>
+                      </box>
                       {showTransactionAccountColumn ? (
                         <text
                           fg={transaction.account_id === null ? gray[600] : gray[200]}
@@ -2095,6 +2156,60 @@ export function App() {
                           {`${"  ".repeat(account.depth)}${account.name}`}
                         </text>
                         <text fg={gray[600]}>{account.type}</text>
+                      </box>
+                    )
+                  })}
+                </box>
+              </Popover>
+              <Popover
+                open={payeePickerOpen}
+                anchorRef={payeeAnchorRef}
+                height={payeeVisibleCount + 1}
+                width={30}
+                anchorMode="overlay"
+              >
+                <box
+                  style={{
+                    width: "100%",
+                    height: payeeVisibleCount + 1,
+                    flexDirection: "column",
+                    backgroundColor: gray[800],
+                  }}
+                >
+                  <input
+                    id="inline-payee-filter"
+                    focused
+                    value={payeeFilter}
+                    placeholder="Set payee"
+                    textColor={gray[100]}
+                    focusedTextColor={gray[100]}
+                    backgroundColor={gray[700]}
+                    focusedBackgroundColor={gray[700]}
+                    cursorColor={gray[200]}
+                    style={{ width: "100%" }}
+                    onInput={(value) => {
+                      setPayeeFilter(value)
+                      setPayeeHighlight(0)
+                    }}
+                  />
+                  {visiblePayeeOptions.length === 0 ? (
+                    <text fg={gray[600]}>
+                      {normalizedPayeeFilter ? "No prefix matches" : "Type to search"}
+                    </text>
+                  ) : visiblePayeeOptions.map((payee, visibleIndex) => {
+                    const index = payeeVisibleStart + visibleIndex
+                    const highlighted = index === payeeHighlight
+                    return (
+                      <box
+                        key={payee}
+                        id={`inline-payee-${payee}`}
+                        style={{
+                          height: 1,
+                          backgroundColor: highlighted ? gray[700] : gray[800],
+                        }}
+                        onMouseDown={() => selectInlinePayee(payee)}
+                      >
+                        <text fg={highlighted ? gray[100] : gray[300]}>{payee}</text>
                       </box>
                     )
                   })}
@@ -2254,9 +2369,9 @@ export function App() {
               ? "transaction editor   tab field   esc read-only"
             : transactionEditorOpen
               ? "tab field   ↑/↓ move transactions when register is focused   esc close"
-              : `${showAccountSidebar ? "tab pane   " : ""}↑/↓ move   a new   e edit   ${showAccountSidebar ? "d delete   " : ""}p/n page`}
+              : `${showAccountSidebar ? "tab pane   " : ""}↑/↓ move   a new   e edit   ${showAccountSidebar ? "d delete   " : ""}pgup/pgdn page`}
         </text>
-        <text fg={gray[600]}>{screen !== "ledger" || transactionEditorOpen ? "" : "c counterpart   r refresh   s sync   q quit"}</text>
+        <text fg={gray[600]}>{screen !== "ledger" || transactionEditorOpen ? "" : "p payee   c counterpart   r refresh   s sync   q quit"}</text>
       </box>
     </box>
     </PopoverProvider>

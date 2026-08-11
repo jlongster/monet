@@ -17,7 +17,7 @@ import use separate optional processes with the same command configuration:
     "config": {},
     "model": null,
     "initializeTimeoutMs": 5000,
-    "requestTimeoutMs": 60000
+    "requestTimeoutMs": 120000
   },
   "import": {
     "command": ["bun", "/path/to/import-plugin.ts"],
@@ -25,7 +25,7 @@ import use separate optional processes with the same command configuration:
     "env": ["IMPORT_API_KEY"],
     "config": {},
     "initializeTimeoutMs": 5000,
-    "requestTimeoutMs": 60000
+    "requestTimeoutMs": 120000
   }
 }
 ```

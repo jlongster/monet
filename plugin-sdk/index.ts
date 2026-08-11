@@ -34,8 +34,9 @@ export type InferencePlugin = {
   version: string
   status(config: unknown): Promise<PluginStatus>
   models(config: unknown): Promise<{ models: InferenceModel[] }>
-  generate(request: GenerateRequest, config: unknown): Promise<GenerateResponse>
+  generate(request: GenerateRequest, config: unknown, signal: AbortSignal): Promise<GenerateResponse>
   structuredOutput?: boolean
+  cancellation?: boolean
   shutdown?(): Promise<void>
 }
 
@@ -97,6 +98,8 @@ export const servePlugin = async (plugin: MonetPlugin) => {
 
   let initialized = false
   let config: unknown = null
+  const controllers = new Map<string, AbortController>()
+  const pending = new Set<Promise<void>>()
   const send = (message: unknown) => process.stdout.write(`${JSON.stringify(message)}\n`)
   const result = (id: unknown, value: unknown) => send({ jsonrpc: "2.0", id, result: value })
   const error = (id: unknown, code: number, message: string, data?: unknown) =>
@@ -114,6 +117,10 @@ export const servePlugin = async (plugin: MonetPlugin) => {
     const id = message.id ?? null
     if (message.jsonrpc !== "2.0" || typeof message.method !== "string") {
       error(id, -32600, "Invalid Request")
+      continue
+    }
+    if (message.method === "$/cancelRequest") {
+      controllers.get(JSON.stringify(message.params?.id))?.abort()
       continue
     }
     try {
@@ -134,35 +141,55 @@ export const servePlugin = async (plugin: MonetPlugin) => {
             inference,
             transactionImport,
             structuredOutput: inference && plugin.structuredOutput === true,
-            cancellation: false,
+            cancellation: inference && plugin.cancellation === true,
             ...(transactionImport && "accounts" in plugin
               ? { payeeFormat: plugin.payeeFormat ?? "raw" }
               : {}),
           },
         })
-      } else if (!initialized) {
-        error(id, -32002, "Plugin is not initialized")
-      } else if (message.method === "inference/status" && "generate" in plugin) {
-        result(id, await plugin.status(config))
-      } else if (message.method === "inference/models" && "models" in plugin) {
-        result(id, await plugin.models(config))
-      } else if (message.method === "inference/generate" && "generate" in plugin) {
-        result(id, await plugin.generate(message.params, config))
-      } else if (message.method === "import/status" && "accounts" in plugin) {
-        result(id, await plugin.status(config))
-      } else if (message.method === "import/accounts" && "accounts" in plugin) {
-        result(id, await plugin.accounts(config))
-      } else if (message.method === "import/transactions" && "transactions" in plugin) {
-        result(id, await plugin.transactions(message.params, config))
       } else if (message.method === "shutdown") {
+        for (const controller of controllers.values()) controller.abort()
+        await Promise.allSettled(pending)
         await plugin.shutdown?.()
         result(id, null)
         process.stdin.pause()
-      } else if (message.method !== "$/cancelRequest") {
-        error(id, -32601, "Method not found")
+      } else {
+        if (!initialized) {
+          error(id, -32002, "Plugin is not initialized")
+          continue
+        }
+        const controller = new AbortController()
+        const key = JSON.stringify(id)
+        controllers.set(key, controller)
+        const task = (async () => {
+          try {
+            if (message.method === "inference/status" && "generate" in plugin) {
+              result(id, await plugin.status(config))
+            } else if (message.method === "inference/models" && "models" in plugin) {
+              result(id, await plugin.models(config))
+            } else if (message.method === "inference/generate" && "generate" in plugin) {
+              result(id, await plugin.generate(message.params, config, controller.signal))
+            } else if (message.method === "import/status" && "accounts" in plugin) {
+              result(id, await plugin.status(config))
+            } else if (message.method === "import/accounts" && "accounts" in plugin) {
+              result(id, await plugin.accounts(config))
+            } else if (message.method === "import/transactions" && "transactions" in plugin) {
+              result(id, await plugin.transactions(message.params, config))
+            } else {
+              error(id, -32601, "Method not found")
+            }
+          } catch (cause) {
+            error(id, -32003, cause instanceof Error ? cause.message : String(cause))
+          } finally {
+            controllers.delete(key)
+          }
+        })()
+        pending.add(task)
+        void task.finally(() => pending.delete(task))
       }
     } catch (cause) {
       error(id, -32003, cause instanceof Error ? cause.message : String(cause))
     }
   }
+  await Promise.allSettled(pending)
 }
