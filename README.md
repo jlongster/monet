@@ -78,6 +78,19 @@ January 1 of that year through the selected date. Categorized payee-inference re
 income and expense accounts and accept an account only when inference returns its validated temporary
 category identifier.
 
+## Sum API
+
+`GET /sum` sums projected posting amounts in signed integer cents. Supply `account` once or repeat it
+to match any of several exact account IDs. Amount and date bounds use the same `gt`, `gte`, `lt`, and
+`lte` operators; all different filters are combined with AND.
+
+```text
+GET /sum?account=account-id-1&account=account-id-2&amount[gte]=-5000&amount[lt]=0&date[gte]=2026-01-01&date[lte]=2026-12-31
+```
+
+The response is `{"sum":-12345}`. Dates must use `YYYY-MM-DD`. An unfiltered request sums all
+postings.
+
 Imports fetch every account snapshot before processing transactions in global chronological batches
 of 200 by default. Override the size with `MONET_TRANSACTION_BATCH_SIZE`. Each completed batch,
 including inference results, becomes payee history for the next batch.

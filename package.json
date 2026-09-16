@@ -6,7 +6,9 @@
   "scripts": {
     "demo-importer": "bun demo-importer/server.ts",
     "inference-opencode": "bun inference-plugins/opencode/index.ts",
-    "eval:task": "bun scripts/payee-eval.ts",
+    "dataset:payees": "bun experiments/typesafe-payee-cleaning/export-payee-dataset.ts",
+    "eval:typesafe-payees": "bun experiments/typesafe-payee-cleaning/typesafe-payee-eval.ts",
+    "eval:typesafe-bank-payees": "bun experiments/typesafe-payee-cleaning/typesafe-bank-payee-eval.ts",
     "dev": "bun scripts/dev.ts",
     "server:restart": "pkill -x monet-server 2>/dev/null || true; mkdir -p .money-tui; nohup cargo run --quiet --manifest-path server/Cargo.toml >> .money-tui/monet-server.stdout.log 2>&1 &",
     "start": "bun src/index.tsx",
@@ -18,6 +20,7 @@
     "@kitlangton/terminal-control-opentui": "^0.6.0",
     "@opentui/core": "latest",
     "@opentui/react": "latest",
+    "@typesafe-ai/sdk": "^0.6.0",
     "effect": "^3.22.0",
     "react": "latest",
     "string-width": "^8.2.1"

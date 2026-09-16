@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     config::ConfigFile,
-    db::{Database, DatabaseError},
+    db::{Database, DatabaseError, TransactionSumFilters},
     error::MonetError,
     model::{
         AccountCursor, AccountDeletion, AccountInput, AccountRecord, AccountTransactionsPage,
@@ -33,6 +33,11 @@ struct Health {
 #[derive(Serialize)]
 struct TransactionCount {
     count: usize,
+}
+
+#[derive(Serialize)]
+struct TransactionSum {
+    sum: i64,
 }
 
 #[derive(Serialize)]
@@ -119,6 +124,7 @@ pub(crate) fn create_router(database: Database, config: ConfigFile) -> Router {
         .route("/inference/restart", post(inference_restart))
         .route("/accounts", get(list_accounts))
         .route("/payees", get(list_payees))
+        .route("/sum", get(sum_transactions))
         .route("/mcp", post(crate::mcp::handle))
         .route("/transactions", get(list_transactions))
         .route(
@@ -355,6 +361,17 @@ async fn list_transactions(
     )?))
 }
 
+async fn sum_transactions(
+    State(state): State<MonetState>,
+    Query(parameters): Query<Vec<(String, String)>>,
+) -> Result<Json<TransactionSum>, MonetError> {
+    let filters = transaction_sum_filters(parameters)?;
+    let database = state.database.lock().map_err(|_| DatabaseError::Poisoned)?;
+    Ok(Json(TransactionSum {
+        sum: database.sum_transactions(&filters)?,
+    }))
+}
+
 async fn list_unbalanced_transactions(
     State(state): State<MonetState>,
     Query(query): Query<AccountPageQuery>,
@@ -427,6 +444,116 @@ fn transaction_page(
         account_types,
         query.search,
     ))
+}
+
+fn transaction_sum_filters(
+    parameters: Vec<(String, String)>,
+) -> Result<TransactionSumFilters, MonetError> {
+    let mut filters = TransactionSumFilters::default();
+    for (name, value) in parameters {
+        match name.as_str() {
+            "account" => {
+                if value.is_empty() {
+                    return Err(invalid_filter("account", "a non-empty account ID"));
+                }
+                if !filters.account_ids.contains(&value) {
+                    filters.account_ids.push(value);
+                }
+            }
+            "amount[gt]" => {
+                set_filter(&mut filters.amount_gt, parse_amount(&name, &value)?, &name)?
+            }
+            "amount[gte]" => {
+                set_filter(&mut filters.amount_gte, parse_amount(&name, &value)?, &name)?
+            }
+            "amount[lt]" => {
+                set_filter(&mut filters.amount_lt, parse_amount(&name, &value)?, &name)?
+            }
+            "amount[lte]" => {
+                set_filter(&mut filters.amount_lte, parse_amount(&name, &value)?, &name)?
+            }
+            "date[gt]" => {
+                validate_date(&name, &value)?;
+                set_filter(&mut filters.date_gt, value, &name)?;
+            }
+            "date[gte]" => {
+                validate_date(&name, &value)?;
+                set_filter(&mut filters.date_gte, value, &name)?;
+            }
+            "date[lt]" => {
+                validate_date(&name, &value)?;
+                set_filter(&mut filters.date_lt, value, &name)?;
+            }
+            "date[lte]" => {
+                validate_date(&name, &value)?;
+                set_filter(&mut filters.date_lte, value, &name)?;
+            }
+            _ => return Err(invalid_filter(&name, "a supported sum filter")),
+        }
+    }
+    Ok(filters)
+}
+
+fn set_filter<T>(slot: &mut Option<T>, value: T, field: &str) -> Result<(), MonetError> {
+    if slot.is_some() {
+        return Err(invalid_filter(field, "a single value"));
+    }
+    *slot = Some(value);
+    Ok(())
+}
+
+fn parse_amount(field: &str, value: &str) -> Result<i64, MonetError> {
+    value
+        .parse()
+        .map_err(|_| invalid_filter(field, "a signed integer number of cents"))
+}
+
+fn validate_date(field: &str, value: &str) -> Result<(), MonetError> {
+    let [year, month, day] = value
+        .split('-')
+        .collect::<Vec<_>>()
+        .try_into()
+        .map_err(|_| invalid_filter(field, "a date in YYYY-MM-DD format"))?;
+    if year.len() != 4 || month.len() != 2 || day.len() != 2 {
+        return Err(invalid_filter(field, "a date in YYYY-MM-DD format"));
+    }
+    let year: u32 = year
+        .parse()
+        .map_err(|_| invalid_filter(field, "a valid date in YYYY-MM-DD format"))?;
+    let month: usize = month
+        .parse()
+        .map_err(|_| invalid_filter(field, "a valid date in YYYY-MM-DD format"))?;
+    let day: u32 = day
+        .parse()
+        .map_err(|_| invalid_filter(field, "a valid date in YYYY-MM-DD format"))?;
+    let leap_year =
+        year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
+    let days = [
+        31,
+        if leap_year { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    if month == 0 || month > days.len() || day == 0 || day > days[month - 1] {
+        return Err(invalid_filter(field, "a valid date in YYYY-MM-DD format"));
+    }
+    Ok(())
+}
+
+fn invalid_filter(field: &str, expected: &'static str) -> MonetError {
+    DatabaseError::Model(ModelError::InvalidValue {
+        field: field.into(),
+        expected,
+    })
+    .into()
 }
 #[cfg(test)]
 mod tests {
@@ -801,6 +928,61 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(expenses["transactions"][0]["account_id"], GROCERIES_ID);
         assert_eq!(expenses["transactions"][0]["amount"], 10_000);
+    }
+
+    #[tokio::test]
+    async fn sum_filters_projected_postings_by_accounts_amount_and_date() {
+        let app = test_app();
+        setup_accounts(&app).await;
+        put_source(&app, -10_000, "Target").await;
+        let (status, _) = request(
+            &app,
+            Method::POST,
+            &format!("/sources/{SOURCE_ID}/changes"),
+            Some(split_changes(6_000, Some(4_000))),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        for (query, expected) in [
+            ("", 0),
+            (&format!("?account={GROCERIES_ID}"), 6_000),
+            (
+                &format!("?account={GROCERIES_ID}&account={HOUSEHOLD_ID}"),
+                10_000,
+            ),
+            ("?amount%5Bgte%5D=4000&amount%5Blte%5D=6000", 10_000),
+            ("?amount%5Bgt%5D=6000", 0),
+            (
+                &format!("?account={GROCERIES_ID}&date%5Bgte%5D=2026-07-20"),
+                6_000,
+            ),
+            (
+                &format!("?account={GROCERIES_ID}&date%5Bgt%5D=2026-07-20"),
+                0,
+            ),
+        ] {
+            let (status, body) = request(&app, Method::GET, &format!("/sum{query}"), None).await;
+            assert_eq!(status, StatusCode::OK, "query: {query}");
+            assert_eq!(body["sum"], expected, "query: {query}");
+        }
+    }
+
+    #[tokio::test]
+    async fn sum_rejects_invalid_filters() {
+        let app = test_app();
+        setup_accounts(&app).await;
+
+        for query in [
+            "amount%5Bgte%5D=one",
+            "amount%5Bgte%5D=1&amount%5Bgte%5D=2",
+            "date%5Blte%5D=2026-02-30",
+            "payee=Target",
+            "account=unknown",
+        ] {
+            let (status, _) = request(&app, Method::GET, &format!("/sum?{query}"), None).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "query: {query}");
+        }
     }
 
     #[tokio::test]

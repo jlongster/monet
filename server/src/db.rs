@@ -25,6 +25,19 @@ pub struct Database {
     connection: Connection,
 }
 
+#[derive(Default)]
+pub struct TransactionSumFilters {
+    pub account_ids: Vec<String>,
+    pub amount_gt: Option<i64>,
+    pub amount_gte: Option<i64>,
+    pub amount_lt: Option<i64>,
+    pub amount_lte: Option<i64>,
+    pub date_gt: Option<String>,
+    pub date_gte: Option<String>,
+    pub date_lt: Option<String>,
+    pub date_lte: Option<String>,
+}
+
 pub struct UnresolvedPayee {
     pub source_id: String,
     pub imported_payee: String,
@@ -1144,6 +1157,49 @@ impl Database {
                 params![account_types, search],
                 |row| row.get(0),
             )
+            .map_err(Into::into)
+    }
+
+    pub fn sum_transactions(&self, filters: &TransactionSumFilters) -> Result<i64, DatabaseError> {
+        let mut sql = String::from("SELECT COALESCE(SUM(amount), 0) FROM postings WHERE 1 = 1");
+        let mut values = Vec::<SqlValue>::new();
+
+        if !filters.account_ids.is_empty() {
+            for account_id in &filters.account_ids {
+                ensure_account(&self.connection, account_id)?;
+            }
+            let placeholders = std::iter::repeat_n("?", filters.account_ids.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            sql.push_str(&format!(" AND account_id IN ({placeholders})"));
+            values.extend(filters.account_ids.iter().cloned().map(SqlValue::Text));
+        }
+
+        for (column, operator, value) in [
+            ("amount", ">", filters.amount_gt),
+            ("amount", ">=", filters.amount_gte),
+            ("amount", "<", filters.amount_lt),
+            ("amount", "<=", filters.amount_lte),
+        ] {
+            if let Some(value) = value {
+                sql.push_str(&format!(" AND {column} {operator} ?"));
+                values.push(SqlValue::Integer(value));
+            }
+        }
+        for (column, operator, value) in [
+            ("date", ">", filters.date_gt.as_ref()),
+            ("date", ">=", filters.date_gte.as_ref()),
+            ("date", "<", filters.date_lt.as_ref()),
+            ("date", "<=", filters.date_lte.as_ref()),
+        ] {
+            if let Some(value) = value {
+                sql.push_str(&format!(" AND {column} {operator} ?"));
+                values.push(SqlValue::Text(value.clone()));
+            }
+        }
+
+        self.connection
+            .query_row(&sql, params_from_iter(values.iter()), |row| row.get(0))
             .map_err(Into::into)
     }
 

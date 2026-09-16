@@ -2,10 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use unicode_normalization::UnicodeNormalization;
 
 pub const RENDER_VERSION: &str = "payee-prompt-v1";
-pub const SCORE_VERSION: &str = "payee-score-v1";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -56,32 +54,6 @@ pub struct InferenceRequest {
 pub struct RenderResult {
     pub version: String,
     pub request: InferenceRequest,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct Reference {
-    pub payee: String,
-    pub category: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ModelOutput {
-    pub text: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ScoreInvocation {
-    pub input: EvalInput,
-    pub reference: HashMap<String, Reference>,
-    pub parameters: Parameters,
-    pub output: ModelOutput,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ScoreResult {
-    pub version: String,
-    pub scores: HashMap<String, Option<f64>>,
-    pub details: Value,
 }
 
 pub fn render(invocation: RenderInvocation) -> RenderResult {
@@ -185,105 +157,6 @@ pub fn render(invocation: RenderInvocation) -> RenderResult {
     }
 }
 
-pub fn score(invocation: ScoreInvocation) -> Result<ScoreResult, serde_json::Error> {
-    let output = parse_output(&invocation.output.text)?;
-    let output = output.as_object().cloned().unwrap_or_default();
-    let count = invocation.input.payees.len();
-    let schema = count == output.len()
-        && invocation
-            .input
-            .payees
-            .iter()
-            .all(|payee| output.get(&payee.id).is_some_and(Value::is_object));
-    let mut payee_correct = 0;
-    let mut category_correct = 0;
-    let mut good_total = 0;
-    let mut good_accepted = 0;
-    let mut bad_total = 0;
-    let mut bad_rejected = 0;
-    for payee in &invocation.input.payees {
-        let Some(reference) = invocation.reference.get(&payee.id) else {
-            continue;
-        };
-        let actual = output.get(&payee.id).and_then(Value::as_object);
-        let actual_payee = actual
-            .and_then(|value| value.get("payee"))
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        if normalize(actual_payee) == normalize(&reference.payee) {
-            payee_correct += 1;
-        }
-        let actual_category = actual.and_then(|value| value.get("category"));
-        let category_matches = match (&reference.category, actual_category) {
-            (None, Some(Value::Null)) => true,
-            (Some(expected), Some(Value::String(actual))) => expected == actual,
-            _ => false,
-        };
-        if category_matches {
-            category_correct += 1;
-        }
-        if invocation.parameters.include_potentials
-            && let Some(potential) = payee.potential_payee.as_deref()
-        {
-            let correct = normalize(potential) == normalize(&reference.payee);
-            let accepted = normalize(potential) == normalize(actual_payee);
-            if correct {
-                good_total += 1;
-                if accepted {
-                    good_accepted += 1;
-                }
-            } else {
-                bad_total += 1;
-                if !accepted {
-                    bad_rejected += 1;
-                }
-            }
-        }
-    }
-    let reference_count = invocation.reference.len();
-    let mut scores = HashMap::new();
-    scores.insert("schema".into(), Some(if schema { 1.0 } else { 0.0 }));
-    scores.insert("payee".into(), ratio(payee_correct, reference_count));
-    scores.insert("category".into(), ratio(category_correct, reference_count));
-    scores.insert("goodHints".into(), ratio(good_accepted, good_total));
-    scores.insert("badHints".into(), ratio(bad_rejected, bad_total));
-    Ok(ScoreResult {
-        version: SCORE_VERSION.into(),
-        scores,
-        details: json!({}),
-    })
-}
-
-fn parse_output(text: &str) -> Result<Value, serde_json::Error> {
-    let trimmed = text.trim();
-    serde_json::from_str(trimmed).or_else(|error| {
-        let inner = trimmed
-            .strip_prefix("```json")
-            .or_else(|| trimmed.strip_prefix("```"))
-            .and_then(|value| value.strip_suffix("```"));
-        inner.map_or(Err(error), |value| serde_json::from_str(value.trim()))
-    })
-}
-
 fn one_line(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-fn normalize(value: &str) -> String {
-    value
-        .nfkc()
-        .flat_map(char::to_lowercase)
-        .map(|character| {
-            if character.is_alphanumeric() {
-                character
-            } else {
-                ' '
-            }
-        })
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-fn ratio(value: usize, total: usize) -> Option<f64> {
-    (total > 0).then_some(value as f64 / total as f64)
 }
