@@ -63,14 +63,10 @@ A leading Square processor prefix (`SQ *`, case-insensitive) is removed from fuz
 from newly cleaned output names. If inference is unavailable or invalid, Monet persists a title-cased
 version of the imported payee instead of leaving the raw description as the displayed payee.
 
-During production imports, unresolved raw payees fall back to configured inference in batches of 100.
-Each input has a temporary `pN` identifier, the complete imported payee, and the winning local payee
-group as an optional potential. The structured response must return exactly the same identifiers or
-the whole batch is rejected. Valid cleaned payees are applied through ordinary `set payee` changes
-and become historical examples when the next resolver snapshot is built. When categorization is
-enabled for the sync, the same request includes every income and expense account under temporary
-`cN` category identifiers. Inference may return one valid category identifier or `null` when it is
-not confident.
+During production imports, every unresolved raw payee falls back to a separate configured inference
+request containing only the raw payee and its inflow/outflow direction. The structured response must
+contain one nonempty `payee` string and no other fields. Valid cleaned payees are applied through
+ordinary `set payee` changes and become historical examples when the next resolver snapshot is built.
 
 Production imports process globally ordered transaction batches of 200 by default, configurable with
 `MONET_TRANSACTION_BATCH_SIZE`. A new resolver snapshot is built from committed, non-pending payee

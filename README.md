@@ -70,13 +70,12 @@ transactions after payee resolution and before income/expense categorization. Se
 plugins](docs/plugins.md) for the protocol and JavaScript SDK.
 
 Raw-payee import plugins use Monet's history-trained Rust payee resolver for newly inserted
-transactions and send unresolved payees to configured inference with correlated temporary IDs.
+transactions and send each unresolved payee to configured inference separately with its direction.
 Clean-payee plugins bypass resolution through the negotiated `payeeFormat` capability. The Debug
 Sync screen runs the real import pipeline and exposes compact payee and inference logs. Every sync
 runs categorization. Starting a sync prompts for a Through date; all accounts are requested from
-January 1 of that year through the selected date. Categorized payee-inference requests include all
-income and expense accounts and accept an account only when inference returns its validated temporary
-category identifier.
+January 1 of that year through the selected date. Payee inference only cleans names; categorization
+and transfer detection remain separate stages.
 
 ## Sum API
 
@@ -101,8 +100,7 @@ When categorization is enabled, Monet assigns opening balances to equity, reconc
 runs one categorization pass from a frozen snapshot. Exact resolved-payee history is scored by amount,
 direction, source account, source type, and calendar recency. Direction is a hard filter and a 10x
 amount gap creates separate regimes; otherwise amount is ignored. Ambiguous local history abstains;
-only a transaction with no usable local cohort may use a retained LLM category. No additional
-inference call is made.
+transactions without a clear local category remain uncategorized.
 
 ## MCP
 

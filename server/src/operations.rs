@@ -34,16 +34,8 @@ struct InitialTransferReview {
 struct PendingPayeeResolution {
     source_ids: Vec<String>,
     imported_payee: String,
-    potential_payee: Option<String>,
     amount_direction: String,
     local_reason: String,
-}
-
-struct PayeePromptLine {
-    id: String,
-    raw_payee: String,
-    potential_payee: Option<String>,
-    direction: String,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -61,8 +53,6 @@ struct InferredPayee {
     payee: String,
     local_reason: String,
     resolution_source: String,
-    category_account_id: Option<String>,
-    potential_transfer: bool,
 }
 
 struct ImportedAccountSnapshot {
@@ -76,7 +66,6 @@ struct QueuedImportedTransaction {
 }
 
 const OPENING_BALANCES_ACCOUNT_ID: &str = "b699843f-11bd-54e8-888b-452cb32be97b";
-const PAYEE_INFERENCE_BATCH_SIZE: usize = 100;
 const DEFAULT_TRANSACTION_BATCH_SIZE: usize = 200;
 fn require_import_config(
     state: &MonetState,
@@ -176,8 +165,6 @@ async fn run_import_inner(
     );
     let mut processed_source_ids = Vec::new();
     let mut new_source_ids = Vec::new();
-    let mut llm_category_suggestions = HashMap::new();
-    let mut llm_potential_transfers = HashSet::new();
     let categories = {
         let database = state.database.lock().map_err(|_| DatabaseError::Poisoned)?;
         payee_categories(&database.list_accounts()?)
@@ -340,17 +327,12 @@ async fn run_import_inner(
                 unresolved_payees.push(PendingPayeeResolution {
                     source_ids: vec![unresolved.source_id],
                     imported_payee: unresolved.imported_payee,
-                    potential_payee: unresolved.potential_payee,
                     amount_direction: unresolved.amount_direction,
                     local_reason: unresolved.local_reason,
                 });
             }
         }
-        let (inferred_payees, suggested_categories, potential_transfers) =
-            resolve_imported_payees(state, &unresolved_payees, &categories).await?;
-        summary.payees_resolved += inferred_payees;
-        llm_category_suggestions.extend(suggested_categories);
-        llm_potential_transfers.extend(potential_transfers);
+        summary.payees_resolved += resolve_imported_payees(state, &unresolved_payees).await?;
     }
 
     summary.deleted_pending = {
@@ -387,8 +369,8 @@ async fn run_import_inner(
         state,
         &categorizer,
         &processed_source_ids,
-        &llm_category_suggestions,
-        &llm_potential_transfers,
+        &HashMap::new(),
+        &HashSet::new(),
         &new_source_ids,
     )?;
     Ok(summary)
@@ -434,10 +416,9 @@ fn remove_superseded_pending(transactions: &mut Vec<ImportedTransaction>) -> usi
 async fn resolve_imported_payees(
     state: &MonetState,
     unresolved: &[PendingPayeeResolution],
-    categories: &[PayeeCategory],
-) -> Result<(usize, HashMap<String, String>, HashSet<String>), MonetError> {
+) -> Result<usize, MonetError> {
     if unresolved.is_empty() {
-        return Ok((0, HashMap::new(), HashSet::new()));
+        return Ok(0);
     }
     let unresolved_sources = unresolved
         .iter()
@@ -458,74 +439,48 @@ async fn resolve_imported_payees(
         }
     };
     let mut resolved = 0;
-    let mut suggested_categories = HashMap::new();
-    let mut potential_transfers = HashSet::new();
-    for batch in unresolved.chunks(PAYEE_INFERENCE_BATCH_SIZE) {
+    for pending in unresolved {
         log_import(
             state,
-            format!("Sending {} unresolved payees to inference", batch.len()),
+            format!(
+                "Sending unresolved payee to inference: {} ({})",
+                prompt_line(&pending.imported_payee),
+                pending.amount_direction
+            ),
         );
-        for category in categories {
-            log_import(
-                state,
-                format!("Payee LLM category: {}: {}", category.alias, category.label),
-            );
-        }
-        for line in payee_inference_lines(batch) {
-            log_import(state, format!("Payee LLM input: {line}"));
-        }
-        let input = payee_inference_input(batch, categories);
+        let input = payee_inference_input(pending);
         let response = match state.inference.generate(inference.clone(), input).await {
             Ok(response) => response,
             Err(error) => {
                 log_import(state, format!("Payee inference failed: {error}"));
-                let fallback = fallback_payees(batch);
-                let persisted = persist_inferred_payees(state, fallback)?;
-                resolved += persisted.0;
-                suggested_categories.extend(persisted.1);
-                potential_transfers.extend(persisted.2);
+                resolved +=
+                    persist_inferred_payees(state, fallback_payees(std::slice::from_ref(pending)))?;
                 continue;
             }
         };
-        if let Some(object) = response
+        let formatted = response
             .structured
             .as_ref()
-            .and_then(serde_json::Value::as_object)
-        {
-            for index in 0..batch.len() {
-                let id = format!("p{}", index + 1);
-                let result = format_inferred_payee(object.get(&id), categories);
-                log_import(state, format!("Payee LLM result: {id}: {result}"));
-            }
-        } else {
-            log_import(state, "Payee LLM result: <missing structured output>");
-        }
+            .and_then(format_inferred_payee)
+            .unwrap_or_else(|| "<missing or invalid>".into());
+        log_import(state, format!("Payee LLM result: {formatted}"));
         let Some(inferred) = response
             .structured
             .as_ref()
-            .and_then(|value| parse_inferred_payees(value, batch, categories))
+            .and_then(|value| parse_inferred_payee(value, pending))
         else {
-            log_import(
-                state,
-                "Payee inference returned incomplete or invalid identifiers",
-            );
-            let fallback = fallback_payees(batch);
-            let persisted = persist_inferred_payees(state, fallback)?;
-            resolved += persisted.0;
-            suggested_categories.extend(persisted.1);
-            potential_transfers.extend(persisted.2);
+            log_import(state, "Payee inference returned an invalid payee");
+            resolved +=
+                persist_inferred_payees(state, fallback_payees(std::slice::from_ref(pending)))?;
             continue;
         };
-        let persisted = persist_inferred_payees(state, inferred)?;
-        resolved += persisted.0;
-        suggested_categories.extend(persisted.1);
-        potential_transfers.extend(persisted.2);
+        resolved += persist_inferred_payees(state, inferred)?;
     }
     log_import(
         state,
         format!("Inference resolved {resolved} of {unresolved_sources} unmatched payees"),
     );
-    Ok((resolved, suggested_categories, potential_transfers))
+    Ok(resolved)
 }
 
 fn fallback_payees(batch: &[PendingPayeeResolution]) -> Vec<InferredPayee> {
@@ -542,8 +497,6 @@ fn fallback_payees(batch: &[PendingPayeeResolution]) -> Vec<InferredPayee> {
                     payee: payee.clone(),
                     local_reason: pending.local_reason.clone(),
                     resolution_source: "fallback".into(),
-                    category_account_id: None,
-                    potential_transfer: false,
                 })
         })
         .collect()
@@ -552,7 +505,7 @@ fn fallback_payees(batch: &[PendingPayeeResolution]) -> Vec<InferredPayee> {
 fn persist_inferred_payees(
     state: &MonetState,
     inferred: Vec<InferredPayee>,
-) -> Result<(usize, HashMap<String, String>, HashSet<String>), MonetError> {
+) -> Result<usize, MonetError> {
     for payee in &inferred {
         log_import(state, format!("Payee fallback/result: {}", payee.payee));
     }
@@ -579,64 +532,13 @@ fn persist_inferred_payees(
         .collect::<Vec<_>>();
     let logs = payee_logs;
     database.append_transaction_logs(&logs)?;
-    let mut suggested_categories = HashMap::new();
-    let mut potential_transfers = HashSet::new();
-    for inferred in inferred {
-        if let Some(account_id) = inferred.category_account_id {
-            suggested_categories.insert(inferred.source_id.clone(), account_id);
-        }
-        if inferred.potential_transfer {
-            potential_transfers.insert(inferred.source_id);
-        }
-    }
-    Ok((resolved, suggested_categories, potential_transfers))
+    Ok(resolved)
 }
 
-fn payee_inference_input(
-    batch: &[PendingPayeeResolution],
-    categories: &[PayeeCategory],
-) -> InferenceGenerateInput {
-    let payees = batch
-        .iter()
-        .enumerate()
-        .map(|(index, pending)| PayeePromptLine {
-            id: format!("p{}", index + 1),
-            raw_payee: pending.imported_payee.clone(),
-            potential_payee: pending.potential_payee.clone(),
-            direction: pending.amount_direction.clone(),
-        })
-        .collect::<Vec<_>>();
-    let rendered = monet_server::payee_prompt::render(monet_server::payee_prompt::RenderInvocation {
-        input: monet_server::payee_prompt::EvalInput {
-            accounts: categories
-                .iter()
-                .map(|category| monet_server::payee_prompt::Account {
-                    id: category.account_id.clone(),
-                    parent_id: None,
-                    name: category
-                        .label
-                        .split_once(": ")
-                        .map_or(category.label.clone(), |(_, name)| name.into()),
-                    account_type: match category.account_type {
-                        CategoryAccountType::Income => "income",
-                        CategoryAccountType::Expense => "expense",
-                    }
-                    .into(),
-                })
-                .collect(),
-            payees: payees
-                .into_iter()
-                .map(|payee| monet_server::payee_prompt::Payee {
-                    id: payee.id,
-                    raw_payee: payee.raw_payee,
-                    direction: payee.direction,
-                    potential_payee: payee.potential_payee,
-                })
-                .collect(),
-        },
-        parameters: monet_server::payee_prompt::Parameters {
-            include_potentials: true,
-        },
+fn payee_inference_input(pending: &PendingPayeeResolution) -> InferenceGenerateInput {
+    let rendered = monet_server::payee_prompt::render(monet_server::payee_prompt::Input {
+        raw_payee: pending.imported_payee.clone(),
+        direction: pending.amount_direction.clone(),
     });
     InferenceGenerateInput {
         model: None,
@@ -647,118 +549,36 @@ fn payee_inference_input(
     }
 }
 
-fn payee_prompt_lines(payees: &[PayeePromptLine]) -> Vec<String> {
-    payees
-        .iter()
-        .map(|payee| {
-            let details = payee
-                .potential_payee
-                .as_deref()
-                .map(|potential| {
-                    format!(
-                        "potential: {}; direction: {}",
-                        prompt_line(potential),
-                        payee.direction
-                    )
-                })
-                .unwrap_or_else(|| format!("direction: {}", payee.direction));
-            format!(
-                "{}: {} ({details})",
-                payee.id,
-                prompt_line(&payee.raw_payee)
-            )
-        })
-        .collect()
-}
-
-fn payee_inference_lines(batch: &[PendingPayeeResolution]) -> Vec<String> {
-    let payees = batch
-        .iter()
-        .enumerate()
-        .map(|(index, pending)| PayeePromptLine {
-            id: format!("p{}", index + 1),
-            raw_payee: pending.imported_payee.clone(),
-            potential_payee: pending.potential_payee.clone(),
-            direction: pending.amount_direction.clone(),
-        })
-        .collect::<Vec<_>>();
-    payee_prompt_lines(&payees)
-}
-
-fn parse_inferred_payees(
+fn parse_inferred_payee(
     structured: &serde_json::Value,
-    batch: &[PendingPayeeResolution],
-    categories: &[PayeeCategory],
+    pending: &PendingPayeeResolution,
 ) -> Option<Vec<InferredPayee>> {
     let object = structured.as_object()?;
-    if object.len() != batch.len() {
+    if object.len() != 1 {
         return None;
     }
-    let category_ids = categories
-        .iter()
-        .map(|category| (category.alias.as_str(), category.account_id.as_str()))
-        .collect::<HashMap<_, _>>();
-    batch
-        .iter()
-        .enumerate()
-        .map(|(index, pending)| {
-            let id = format!("p{}", index + 1);
-            let value = object.get(&id)?;
-            let result = value.as_object()?;
-            let payee = result.get("payee")?.as_str()?.trim();
-            let (category_account_id, potential_transfer) = match result.get("category")? {
-                serde_json::Value::Null => (None, false),
-                serde_json::Value::String(alias) if alias == "transfer" => (None, true),
-                serde_json::Value::String(alias) => {
-                    (Some((*category_ids.get(alias.as_str())?).to_owned()), false)
-                }
-                _ => return None,
-            };
-            let payee = clean_payee_name(payee);
-            (!payee.is_empty()).then(|| {
-                pending
-                    .source_ids
-                    .iter()
-                    .map(|source_id| InferredPayee {
-                        source_id: source_id.clone(),
-                        imported_payee: pending.imported_payee.clone(),
-                        payee: payee.clone(),
-                        local_reason: pending.local_reason.clone(),
-                        resolution_source: "LLM".into(),
-                        category_account_id: category_account_id.clone(),
-                        potential_transfer,
-                    })
-                    .collect::<Vec<_>>()
+    let payee = clean_payee_name(object.get("payee")?.as_str()?.trim());
+    (!payee.is_empty()).then(|| {
+        pending
+            .source_ids
+            .iter()
+            .map(|source_id| InferredPayee {
+                source_id: source_id.clone(),
+                imported_payee: pending.imported_payee.clone(),
+                payee: payee.clone(),
+                local_reason: pending.local_reason.clone(),
+                resolution_source: "LLM".into(),
             })
-        })
-        .collect::<Option<Vec<_>>>()
-        .map(|groups| groups.into_iter().flatten().collect())
+            .collect()
+    })
 }
 
-fn format_inferred_payee(
-    value: Option<&serde_json::Value>,
-    categories: &[PayeeCategory],
-) -> String {
-    let Some(value) = value else {
-        return "<missing or invalid>".into();
-    };
-    let Some(result) = value.as_object() else {
-        return "<missing or invalid>".into();
-    };
-    let Some(payee) = result.get("payee").and_then(serde_json::Value::as_str) else {
-        return "<missing or invalid>".into();
-    };
-    let category = result
-        .get("category")
-        .and_then(serde_json::Value::as_str)
-        .and_then(|alias| categories.iter().find(|category| category.alias == alias));
-    if result.get("category").and_then(serde_json::Value::as_str) == Some("transfer") {
-        return format!("{} (category: transfer)", clean_payee_name(payee));
-    }
-    match category {
-        Some(category) => format!("{} (category: {})", clean_payee_name(payee), category.label),
-        None => clean_payee_name(payee),
-    }
+fn format_inferred_payee(value: &serde_json::Value) -> Option<String> {
+    value
+        .as_object()?
+        .get("payee")?
+        .as_str()
+        .map(clean_payee_name)
 }
 
 fn payee_categories(accounts: &[AccountRecord]) -> Vec<PayeeCategory> {
@@ -1277,154 +1097,47 @@ mod tests {
     use super::*;
 
     #[test]
-    fn payee_inference_uses_stable_ids_and_local_potentials() {
-        let batch = vec![
-            PendingPayeeResolution {
-                source_ids: vec!["source-1".into(), "source-1-copy".into()],
-                imported_payee: "POS  PURCHASE\nAMAZON PRIME #1234".into(),
-                potential_payee: Some("Amazon".into()),
-                amount_direction: "outflow".into(),
-                local_reason: "below threshold".into(),
-            },
-            PendingPayeeResolution {
-                source_ids: vec!["source-2".into()],
-                imported_payee: "NEW MERCHANT 9912".into(),
-                potential_payee: None,
-                amount_direction: "inflow".into(),
-                local_reason: "no candidates".into(),
-            },
-        ];
+    fn payee_inference_renders_and_parses_one_payee() {
+        let pending = PendingPayeeResolution {
+            source_ids: vec!["source-1".into(), "source-1-copy".into()],
+            imported_payee: "POS  PURCHASE\nWHOLEFDS #10234".into(),
+            amount_direction: "outflow".into(),
+            local_reason: "below threshold".into(),
+        };
 
-        let input = payee_inference_input(&batch, &[]);
-        assert!(input.prompt.contains(
-            "p1: POS PURCHASE AMAZON PRIME #1234 (potential: Amazon; direction: outflow)"
-        ));
-        assert!(
-            input
-                .prompt
-                .contains("p2: NEW MERCHANT 9912 (direction: inflow)")
+        let input = payee_inference_input(&pending);
+        assert_eq!(
+            input.prompt,
+            "Raw payee: POS PURCHASE WHOLEFDS #10234\nDirection: outflow"
         );
-        assert!(!input.prompt.contains("potential: none"));
-        assert!(
-            input
-                .prompt
-                .contains("transfer: Transfer between financial accounts")
-        );
+        assert!(!input.prompt.contains("category"));
         let schema = input.output_schema.unwrap();
-        assert_eq!(schema["required"], json!(["p1", "p2"]));
-        assert_eq!(
-            schema["properties"]["p1"],
-            json!({ "$ref": "#/$defs/result" })
-        );
-        assert_eq!(
-            schema["properties"]["p2"],
-            json!({ "$ref": "#/$defs/result" })
-        );
-        assert_eq!(
-            schema["$defs"]["result"]["required"],
-            json!(["payee", "category"])
-        );
+        assert_eq!(schema["required"], json!(["payee"]));
+        assert!(schema["properties"].get("category").is_none());
 
         assert_eq!(
-            parse_inferred_payees(
-                &json!({
-                    "p2": { "payee": "New Merchant", "category": "transfer" },
-                    "p1": { "payee": "Amazon Prime", "category": null }
-                }),
-                &batch,
-                &[],
-            ),
+            parse_inferred_payee(&json!({ "payee": "sq *WHOLE FOODS" }), &pending),
             Some(vec![
                 InferredPayee {
                     source_id: "source-1".into(),
-                    imported_payee: "POS  PURCHASE\nAMAZON PRIME #1234".into(),
-                    payee: "Amazon Prime".into(),
+                    imported_payee: "POS  PURCHASE\nWHOLEFDS #10234".into(),
+                    payee: "Whole Foods".into(),
                     local_reason: "below threshold".into(),
                     resolution_source: "LLM".into(),
-                    category_account_id: None,
-                    potential_transfer: false,
                 },
                 InferredPayee {
                     source_id: "source-1-copy".into(),
-                    imported_payee: "POS  PURCHASE\nAMAZON PRIME #1234".into(),
-                    payee: "Amazon Prime".into(),
+                    imported_payee: "POS  PURCHASE\nWHOLEFDS #10234".into(),
+                    payee: "Whole Foods".into(),
                     local_reason: "below threshold".into(),
                     resolution_source: "LLM".into(),
-                    category_account_id: None,
-                    potential_transfer: false,
-                },
-                InferredPayee {
-                    source_id: "source-2".into(),
-                    imported_payee: "NEW MERCHANT 9912".into(),
-                    payee: "New Merchant".into(),
-                    local_reason: "no candidates".into(),
-                    resolution_source: "LLM".into(),
-                    category_account_id: None,
-                    potential_transfer: true,
                 },
             ])
         );
         assert_eq!(
-            parse_inferred_payees(
-                &json!({ "p1": { "payee": "Amazon Prime", "category": null } }),
-                &batch,
-                &[],
-            ),
-            None
-        );
-        assert_eq!(
-            parse_inferred_payees(
-                &json!({
-                    "p1": { "payee": "Amazon Prime", "category": null },
-                    "p2": { "payee": "New Merchant", "category": null },
-                    "p3": { "payee": "Wrong", "category": null }
-                }),
-                &batch,
-                &[],
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn payee_inference_can_return_a_confident_category() {
-        let batch = vec![PendingPayeeResolution {
-            source_ids: vec!["source-1".into()],
-            imported_payee: "WHOLEFDS #10234".into(),
-            potential_payee: Some("Whole Foods".into()),
-            amount_direction: "outflow".into(),
-            local_reason: "below threshold".into(),
-        }];
-        let categories = vec![PayeeCategory {
-            alias: "c1".into(),
-            account_id: "groceries".into(),
-            label: "expense: Expenses > Groceries".into(),
-            account_type: CategoryAccountType::Expense,
-        }];
-
-        let input = payee_inference_input(&batch, &categories);
-        assert!(input.prompt.contains("c1: expense: Expenses > Groceries"));
-        assert_eq!(
-            parse_inferred_payees(
-                &json!({ "p1": { "payee": "sq *WHOLE FOODS", "category": "c1" } }),
-                &batch,
-                &categories,
-            ),
-            Some(vec![InferredPayee {
-                source_id: "source-1".into(),
-                imported_payee: "WHOLEFDS #10234".into(),
-                payee: "Whole Foods".into(),
-                local_reason: "below threshold".into(),
-                resolution_source: "LLM".into(),
-                category_account_id: Some("groceries".into()),
-                potential_transfer: false,
-            }])
-        );
-        assert_eq!(
-            parse_inferred_payees(
-                &json!({ "p1": { "payee": "Whole Foods", "category": "c2" } }),
-                &batch,
-                &categories,
+            parse_inferred_payee(
+                &json!({ "payee": "Whole Foods", "category": "groceries" }),
+                &pending,
             ),
             None
         );

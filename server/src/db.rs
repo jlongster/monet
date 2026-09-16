@@ -41,7 +41,6 @@ pub struct TransactionSumFilters {
 pub struct UnresolvedPayee {
     pub source_id: String,
     pub imported_payee: String,
-    pub potential_payee: Option<String>,
     pub amount_direction: String,
     pub local_reason: String,
 }
@@ -445,7 +444,6 @@ impl Database {
                     unresolved_payees.push(UnresolvedPayee {
                         source_id: source_id.clone(),
                         imported_payee: imported_payee.clone(),
-                        potential_payee: resolution.potential_payee,
                         amount_direction: if transaction.amount > 0 {
                             "inflow"
                         } else if transaction.amount < 0 {
