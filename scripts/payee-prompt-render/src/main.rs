@@ -1,6 +1,6 @@
 use std::fs;
 
-use monet_server::payee_eval::{EvalInput, Parameters, RenderInvocation, render};
+use monet_server::payee_prompt::{EvalInput, Parameters, RenderInvocation, render};
 
 fn main() {
     if let Err(error) = run() {

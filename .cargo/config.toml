@@ -1,2 +1,2 @@
 [alias]
-payee-render-files = "run -q --manifest-path experiments/payee-render-files/Cargo.toml"
+payee-prompt-render = "run -q --manifest-path scripts/payee-prompt-render/Cargo.toml"

@@ -1,12 +1,12 @@
-# Payee prompt file renderer
+# Payee prompt renderer
 
-This experiment renders Monet's existing generative payee-cleaning prompt through files instead of
-the eval runner's stdin/stdout protocol.
+This standalone CLI renders Monet's generative payee-cleaning prompt through files. It lives outside
+the server executable while reusing the shared `monet_server::payee_prompt` library module.
 
 From the Monet repository root, create `input.json` using the `EvalInput` shape and run:
 
 ```sh
-cargo payee-render-files
+cargo payee-prompt-render
 ```
 
 The command writes `prompt.md` in the current directory. It includes the system prompt, user prompt,

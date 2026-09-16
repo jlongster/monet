@@ -606,11 +606,11 @@ fn payee_inference_input(
             direction: pending.amount_direction.clone(),
         })
         .collect::<Vec<_>>();
-    let rendered = monet_server::payee_eval::render(monet_server::payee_eval::RenderInvocation {
-        input: monet_server::payee_eval::EvalInput {
+    let rendered = monet_server::payee_prompt::render(monet_server::payee_prompt::RenderInvocation {
+        input: monet_server::payee_prompt::EvalInput {
             accounts: categories
                 .iter()
-                .map(|category| monet_server::payee_eval::Account {
+                .map(|category| monet_server::payee_prompt::Account {
                     id: category.account_id.clone(),
                     parent_id: None,
                     name: category
@@ -626,7 +626,7 @@ fn payee_inference_input(
                 .collect(),
             payees: payees
                 .into_iter()
-                .map(|payee| monet_server::payee_eval::Payee {
+                .map(|payee| monet_server::payee_prompt::Payee {
                     id: payee.id,
                     raw_payee: payee.raw_payee,
                     direction: payee.direction,
@@ -634,7 +634,7 @@ fn payee_inference_input(
                 })
                 .collect(),
         },
-        parameters: monet_server::payee_eval::Parameters {
+        parameters: monet_server::payee_prompt::Parameters {
             include_potentials: true,
         },
     });
